@@ -1,0 +1,41 @@
+{
+  "name": "gatepass-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "nodemon server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kanad2004/GatePass-Backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Kanad2004/GatePass-Backend/issues"
+  },
+  "homepage": "https://github.com/Kanad2004/GatePass-Backend#readme",
+  "description": "",
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  },
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "csv-writer": "^1.6.0",
+    "date-fns": "^4.1.0",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.14.2",
+    "nodemailer": "^6.10.1",
+    "papaparse": "^5.5.2",
+    "pdfkit": "^0.17.1",
+    "qrcode": "^1.5.4",
+    "redis": "^4.7.0",
+    "uuid": "^11.1.0"
+  }
+}
