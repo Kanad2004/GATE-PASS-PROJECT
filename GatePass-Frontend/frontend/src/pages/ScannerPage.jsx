@@ -28,11 +28,9 @@ const ScannerPage = () => {
   const [success, setSuccess] = useState("");
   const [scanResult, setScanResult] = useState(null);
   const [isScanning, setIsScanning] = useState(false);
-  const [lastScanned, setLastScanned] = useState(null);
   const [loading, setLoading] = useState(false);
   const [imageFile, setImageFile] = useState(null);
   const [showTutorial, setShowTutorial] = useState(true);
-  const [entryExitMessage, setEntryExitMessage] = useState("");
   const [devices, setDevices] = useState([]);
   const [cameraId, setCameraId] = useState(null);
   const [dragActive, setDragActive] = useState(false);
@@ -41,115 +39,133 @@ const ScannerPage = () => {
   const [cameraError, setCameraError] = useState("");
   const [permissionState, setPermissionState] = useState("unknown");
   const [showPermissionDialog, setShowPermissionDialog] = useState(false);
-
-  // **NEW: Track scanner readiness**
   const [scannerReady, setScannerReady] = useState(false);
 
   const scannerRef = useRef(null);
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
   const lastScanTimeRef = useRef(0);
-  const cleanupRef = useRef(null);
 
-  // Debounced scan handler to prevent rapid scans
+  // **FIXED: Safe scanner stop function with proper state checking**
+  const stopScanner = useCallback(async () => {
+    try {
+      if (!scannerRef.current) {
+        setIsScanning(false);
+        return;
+      }
+
+      // Check scanner state before stopping
+      const state = scannerRef.current.getState();
+      console.log("Scanner state before stop:", state);
+
+      // Only stop if scanner is in scanning state (state === 2)
+      if (state === 2) {
+        await scannerRef.current.stop();
+        console.log("Scanner stopped successfully");
+      } else {
+        console.log("Scanner not in scanning state, skipping stop()");
+      }
+
+      // Always clear after stop (if scanner exists)
+      try {
+        await scannerRef.current.clear();
+        console.log("Scanner cleared successfully");
+      } catch (clearError) {
+        console.warn("Scanner clear warning:", clearError);
+      }
+    } catch (err) {
+      console.warn("Stop scanner warning (non-critical):", err.message);
+      // Don't throw error, just log it as it's often expected behavior
+    } finally {
+      setIsScanning(false);
+    }
+  }, []);
+
+  // **FIXED: Enhanced navigation function with safe scanner stopping**
+  const navigateToHome = useCallback(
+    async (scanData) => {
+      try {
+        // Stop scanner safely before navigation
+        if (isScanning) {
+          await stopScanner();
+        }
+
+        // Clear current state to prevent conflicts
+        setError("");
+        setSuccess("");
+        setScanResult(null);
+        setLoading(false);
+
+        // Small delay to ensure scanner is fully stopped
+        setTimeout(() => {
+          navigate("/", {
+            replace: true,
+            state: {
+              activeTab: "home",
+              scanResult: scanData,
+              timestamp: Date.now(),
+            },
+          });
+        }, 100);
+      } catch (error) {
+        console.error("Navigation error:", error);
+        // Fallback: Force navigation without state
+        navigate("/", { replace: true });
+      }
+    },
+    [navigate, isScanning, stopScanner]
+  );
+
+  // Debounced scan handler
   const debouncedScan = useCallback((decodedText) => {
     const now = Date.now();
-    if (now - lastScanTimeRef.current < 2000) return; // 2 second debounce
+    if (now - lastScanTimeRef.current < 2000) return;
     lastScanTimeRef.current = now;
     handleScanSuccess(decodedText);
   }, []);
 
-  // **ENHANCED: Multiple camera enumeration with proper device handling**
+  // Initialize cameras
   const initializeCameras = async (retryCount = 0) => {
     try {
-      console.log("Initializing cameras, attempt:", retryCount + 1);
-
       const allDevices = await navigator.mediaDevices.enumerateDevices();
       const videoDevices = allDevices.filter(
         (device) => device.kind === "videoinput"
       );
 
-      console.log("Found video devices:", videoDevices);
-
       if (videoDevices && videoDevices.length > 0) {
         const cameras = videoDevices.map((device, index) => ({
           id: device.deviceId,
-          label:
-            device.label ||
-            `Camera ${index + 1}` +
-              (device.deviceId.includes("usb") ? " (USB)" : "") +
-              (device.deviceId.includes("built") ? " (Built-in)" : ""),
+          label: device.label || `Camera ${index + 1}`,
         }));
 
         setDevices(cameras);
-
-        let selectedCameraId = null;
-
-        // 1. Prefer back/rear/environment camera
-        const backCamera = cameras.find(
-          (camera) =>
-            camera.label.toLowerCase().includes("back") ||
-            camera.label.toLowerCase().includes("rear") ||
-            camera.label.toLowerCase().includes("environment")
-        );
-
-        // 2. Prefer USB/external cameras (usually better quality)
-        const usbCamera = cameras.find(
-          (camera) =>
-            camera.label.toLowerCase().includes("usb") ||
-            camera.id.includes("usb")
-        );
-
-        // 3. Fall back to first camera
-        selectedCameraId = backCamera?.id || usbCamera?.id || cameras[0].id;
+        const selectedCameraId =
+          cameras.find(
+            (cam) =>
+              cam.label.toLowerCase().includes("back") ||
+              cam.label.toLowerCase().includes("rear") ||
+              cam.label.toLowerCase().includes("environment")
+          )?.id || cameras[0].id;
 
         setCameraId(selectedCameraId);
         setCameraError("");
-
-        console.log("Selected camera ID:", selectedCameraId);
-        console.log("Available cameras:", cameras);
-
         return true;
       } else {
         if (retryCount < 3) {
-          console.log("No cameras found, retrying in 1 second...");
           await new Promise((resolve) => setTimeout(resolve, 1000));
           return await initializeCameras(retryCount + 1);
         } else {
-          setCameraError(
-            "No cameras detected. Please connect a camera device or refresh the page."
-          );
+          setCameraError("No cameras detected.");
           return false;
         }
       }
     } catch (error) {
-      console.error("Failed to enumerate devices:", error);
-
-      try {
-        console.log("Falling back to Html5Qrcode.getCameras()");
-        const cameras = await Html5Qrcode.getCameras();
-        if (cameras && cameras.length > 0) {
-          setDevices(cameras);
-          const backCamera = cameras.find(
-            (camera) =>
-              camera.label.toLowerCase().includes("back") ||
-              camera.label.toLowerCase().includes("rear") ||
-              camera.label.toLowerCase().includes("environment")
-          );
-          setCameraId(backCamera ? backCamera.id : cameras[0].id);
-          setCameraError("");
-          return true;
-        }
-      } catch (fallbackError) {
-        console.error("Fallback camera enumeration failed:", fallbackError);
-      }
-
       setCameraError(`Failed to access cameras: ${error.message}`);
       return false;
     }
   };
 
-  // Check camera permissions
+  // Check permissions
   const checkCameraPermissions = async () => {
     try {
       if ("permissions" in navigator) {
@@ -157,231 +173,126 @@ const ScannerPage = () => {
           name: "camera",
         });
         setPermissionState(permission.state);
-
-        if (permission.state === "granted") {
-          return true;
-        } else if (permission.state === "denied") {
-          setShowPermissionDialog(true);
-          return false;
-        } else if (permission.state === "prompt") {
+        if (permission.state === "granted") return true;
+        if (permission.state === "denied" || permission.state === "prompt") {
           setShowPermissionDialog(true);
           return false;
         }
       }
 
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-        });
-        stream.getTracks().forEach((track) => track.stop());
-        setPermissionState("granted");
-        return true;
-      } catch (err) {
-        console.error("Camera access test failed:", err);
-        if (err.name === "NotAllowedError") {
-          setPermissionState("denied");
-          setShowPermissionDialog(true);
-        } else if (err.name === "NotFoundError") {
-          setCameraError("No camera found. Please connect a camera device.");
-        } else {
-          setCameraError(`Camera access failed: ${err.message}`);
-        }
-        return false;
-      }
-    } catch (error) {
-      console.error("Permission check failed:", error);
-      setCameraError("Unable to check camera permissions.");
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      stream.getTracks().forEach((track) => track.stop());
+      setPermissionState("granted");
+      return true;
+    } catch (err) {
+      setCameraError(`Camera access failed: ${err.message}`);
       return false;
     }
   };
 
-  // **ENHANCED: Request camera permission with better UX**
+  // Request permission
   const requestCameraPermission = async () => {
     setLoading(true);
     setShowPermissionDialog(false);
-    setCameraError("");
-    setError("");
-
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: "environment",
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
+        video: { facingMode: "environment" },
       });
-
       stream.getTracks().forEach((track) => track.stop());
-
       setPermissionState("granted");
-      setSuccess("✅ Camera access granted! Initializing cameras...");
-
+      setSuccess("✅ Camera access granted!");
       setTimeout(async () => {
-        const success = await initializeCameras();
-        if (success) {
-          setSuccess("✅ Camera access granted! You can now start scanning.");
-        } else {
-          setSuccess("");
-          setCameraError(
-            "Cameras initialized but none detected. Please refresh the page."
-          );
-        }
-
-        setTimeout(() => setSuccess(""), 3000);
+        await initializeCameras();
+        setSuccess("");
       }, 500);
     } catch (error) {
-      console.error("Camera permission request failed:", error);
-
-      if (error.name === "NotAllowedError") {
-        setPermissionState("denied");
-        setError(
-          "❌ Camera permission denied. Please allow camera access in your browser settings and refresh the page."
-        );
-      } else if (error.name === "NotFoundError") {
-        setError(
-          "📷 No camera device found. Please connect a camera or use image upload."
-        );
-      } else if (error.name === "NotReadableError") {
-        setError(
-          "🔒 Camera is being used by another application. Please close other apps."
-        );
-      } else {
-        setError(`⚠️ Camera access failed: ${error.message}`);
-      }
+      setError(`Camera access failed: ${error.message}`);
     } finally {
       setLoading(false);
     }
   };
 
-  // Network status monitoring
+  // Network monitoring
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
-
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
-
     return () => {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
     };
   }, []);
 
-  // **ENHANCED: Scanner initialization with retry logic**
+  // **ENHANCED: Scanner initialization with safe cleanup**
   useEffect(() => {
     const user = safeLocalStorage.get("user");
     if (!user || user.role !== "admin") {
       setError("You must be logged in as an admin to access this page.");
-      const timer = setTimeout(() => navigate("/login"), 3000);
-      return () => clearTimeout(timer);
+      setTimeout(() => navigate("/login"), 3000);
+      return;
     }
 
     const hasSeenTutorial = safeLocalStorage.get("hasSeenScannerTutorial");
-    if (hasSeenTutorial) {
-      setShowTutorial(false);
-    }
+    if (hasSeenTutorial) setShowTutorial(false);
 
     const initializeScanner = async () => {
       try {
         setScannerReady(false);
 
-        // **FIX: Clear any existing scanner first**
+        // **ENHANCED: Safe cleanup of existing scanner**
         if (scannerRef.current) {
           try {
-            if (scannerRef.current.getState() === 2) {
+            const state = scannerRef.current.getState();
+            if (state === 2) {
               await scannerRef.current.stop();
             }
             await scannerRef.current.clear();
           } catch (e) {
-            console.warn("Failed to clear existing scanner:", e);
+            console.warn("Scanner cleanup warning:", e);
           }
           scannerRef.current = null;
         }
 
-        // **FIX: Add a small delay to ensure DOM is ready**
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await new Promise((resolve) => setTimeout(resolve, 300));
 
         scannerRef.current = new Html5Qrcode("qr-reader", {
           formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
           verbose: false,
         });
 
-        console.log("✅ Scanner initialized successfully");
         setScannerReady(true);
-
         const hasPermission = await checkCameraPermissions();
-
-        if (hasPermission === true) {
-          await initializeCameras();
-        }
+        if (hasPermission) await initializeCameras();
       } catch (err) {
         console.error("Scanner initialization error:", err);
         setScannerReady(false);
         setCameraError(`Failed to initialize scanner: ${err.message}`);
-
-        // **FIX: Retry initialization after delay**
-        setTimeout(() => {
-          console.log("Retrying scanner initialization...");
-          initializeScanner();
-        }, 2000);
       }
     };
 
     initializeScanner();
 
-    cleanupRef.current = async () => {
+    // **ENHANCED: Safe cleanup function**
+    return () => {
       if (scannerRef.current) {
         try {
-          if (scannerRef.current.getState() === 2) {
-            await scannerRef.current.stop();
+          const state = scannerRef.current.getState();
+          if (state === 2) {
+            scannerRef.current.stop().catch(() => {});
           }
-          await scannerRef.current.clear();
-        } catch (err) {
-          console.error("Scanner cleanup error:", err);
+          scannerRef.current.clear().catch(() => {});
+        } catch (e) {
+          console.warn("Cleanup warning:", e);
         }
         scannerRef.current = null;
       }
     };
-
-    return cleanupRef.current;
   }, [navigate]);
 
-  // **FIX: Set default cameraId when devices change**
-  useEffect(() => {
-    if (devices.length > 0 && !cameraId) {
-      const backCamera = devices.find(
-        (camera) =>
-          camera.label.toLowerCase().includes("back") ||
-          camera.label.toLowerCase().includes("rear") ||
-          camera.label.toLowerCase().includes("environment")
-      );
-      const usbCamera = devices.find(
-        (camera) =>
-          camera.label.toLowerCase().includes("usb") ||
-          camera.id.includes("usb")
-      );
-      const defaultId = backCamera?.id || usbCamera?.id || devices[0].id;
-      setCameraId(defaultId);
-      setError("");
-      console.log("Set default cameraId to:", defaultId);
-    }
-  }, [devices, cameraId]);
-
   const startScanner = async () => {
-    console.log("Starting scanner with cameraId:", cameraId);
-    console.log("Available devices:", devices);
-
-    if (!scannerRef.current || !cameraId) {
-      setError(
-        "No camera selected. Please enable camera access or upload a QR code image."
-      );
-      return;
-    }
-
-    if (!checkNetworkConnection()) {
-      setError(
-        "No internet connection. Please check your network and try again."
-      );
+    if (!scannerRef.current || !cameraId || !checkNetworkConnection()) {
+      setError("Scanner or camera not available, or no internet connection.");
       return;
     }
 
@@ -389,19 +300,11 @@ const ScannerPage = () => {
       setError("");
       setCameraError("");
       setSuccess("");
-      setScanResult(null);
       setIsScanning(true);
-
-      const config = {
-        fps: 10,
-        qrbox: { width: 280, height: 280 },
-        aspectRatio: 1.0,
-        disableFlip: false,
-      };
 
       await scannerRef.current.start(
         cameraId,
-        config,
+        { fps: 10, qrbox: { width: 280, height: 280 } },
         debouncedScan,
         (errorMessage) => {
           if (!errorMessage.includes("NotFoundException")) {
@@ -412,48 +315,25 @@ const ScannerPage = () => {
     } catch (err) {
       console.error("Start scanner error:", err);
       setIsScanning(false);
-
-      if (err.name === "NotAllowedError") {
-        setPermissionState("denied");
-        setCameraError("Camera access denied. Please grant camera permission.");
-        setShowPermissionDialog(true);
-      } else if (err.name === "NotFoundError") {
-        setCameraError(
-          "Camera not found. Please check your camera connection."
-        );
-      } else if (err.name === "NotReadableError") {
-        setCameraError(
-          "Camera is being used by another application. Please close other apps and try again."
-        );
-      } else {
-        setCameraError(`Failed to start camera: ${err.message}`);
-      }
+      setCameraError(`Failed to start camera: ${err.message}`);
     }
   };
 
-  const stopScanner = async () => {
-    if (scannerRef.current) {
-      try {
-        if (scannerRef.current.getState() === 2) {
-          await scannerRef.current.stop();
-          scannerRef.current.clear();
-        }
-        setIsScanning(false);
-      } catch (err) {
-        console.error("Stop scanner error:", err);
-        setError(`Failed to stop scanner: ${err.message}`);
-        setIsScanning(false);
-      }
-    }
-  };
-
+  // **FIXED: Enhanced scan success handler with safe navigation**
   const handleScanSuccess = async (qrString) => {
     if (loading || !qrString) return;
 
     try {
       checkRateLimit("qr-scan", 10, 60000);
     } catch (rateLimitError) {
-      setError(rateLimitError.message);
+      const scanResultData = {
+        success: false,
+        message: rateLimitError.message,
+        user: null,
+        entryTime: null,
+        exitTime: null,
+      };
+      await navigateToHome(scanResultData);
       return;
     }
 
@@ -461,12 +341,6 @@ const ScannerPage = () => {
     setScanCount((prev) => prev + 1);
 
     try {
-      await stopScanner();
-      setError("");
-      setSuccess("");
-      setScanResult(null);
-      setEntryExitMessage("");
-
       const user = safeLocalStorage.get("user");
       if (!user?.accessToken) {
         throw new Error("Session expired. Please login again.");
@@ -474,16 +348,12 @@ const ScannerPage = () => {
 
       const response = await scanQr(qrString, user.accessToken);
 
-      let message = "";
-      let entryExitMessage = "";
       let scanResultData = null;
 
       if (response.entryTime) {
-        message = `Entry granted for ${response.user.name} at ${new Date(response.entryTime).toLocaleString()}`;
-        entryExitMessage = `Entering at ${new Date(response.entryTime).toLocaleTimeString()}`;
-        setSuccess(message);
-        setEntryExitMessage(entryExitMessage);
-        speak("Entry granted");
+        const message = `Entry granted for ${response.user.name} at ${new Date(response.entryTime).toLocaleString()}`;
+        const entryExitMessage = `Entering at ${new Date(response.entryTime).toLocaleTimeString()}`;
+
         scanResultData = {
           success: true,
           message,
@@ -492,12 +362,13 @@ const ScannerPage = () => {
           entryTime: response.entryTime,
           exitTime: null,
         };
+
+        setSuccess("Entry logged successfully! Redirecting...");
+        speak("Entry granted");
       } else if (response.exitTime) {
-        message = `Exit logged for ${response.user.name} at ${new Date(response.exitTime).toLocaleString()}`;
-        entryExitMessage = `Exiting at ${new Date(response.exitTime).toLocaleTimeString()}`;
-        setSuccess(message);
-        setEntryExitMessage(entryExitMessage);
-        speak("Exit logged");
+        const message = `Exit logged for ${response.user.name} at ${new Date(response.exitTime).toLocaleString()}`;
+        const entryExitMessage = `Exiting at ${new Date(response.exitTime).toLocaleTimeString()}`;
+
         scanResultData = {
           success: true,
           message,
@@ -506,25 +377,22 @@ const ScannerPage = () => {
           entryTime: null,
           exitTime: response.exitTime,
         };
+
+        setSuccess("Exit logged successfully! Redirecting...");
+        speak("Exit logged");
       } else {
         throw new Error(
           "Invalid scan response: No entry or exit time provided"
         );
       }
 
-      safeLocalStorage.set("scanResult", scanResultData);
-
-      navigate("/", {
-        state: {
-          activeTab: "home",
-          scanResult: scanResultData,
-        },
-      });
+      // **KEY: Navigate after a brief delay**
+      setTimeout(async () => {
+        await navigateToHome(scanResultData);
+      }, 500);
     } catch (err) {
       console.error("Scan error:", err);
       const errorMessage = err.message || "Invalid or expired QR code";
-      setError(errorMessage);
-      speak("Scan Failed");
 
       const scanResultData = {
         success: false,
@@ -535,31 +403,23 @@ const ScannerPage = () => {
         exitTime: null,
       };
 
-      safeLocalStorage.set("scanResult", scanResultData);
-      navigate("/", {
-        state: {
-          activeTab: "home",
-          scanResult: scanResultData,
-        },
-      });
+      speak("Scan Failed");
+
+      // **KEY: Navigate to home even on error**
+      setTimeout(async () => {
+        await navigateToHome(scanResultData);
+      }, 500);
     } finally {
       setLoading(false);
     }
   };
 
   const speak = (text) => {
-    if ("speechSynthesis" in window && window.speechSynthesis) {
+    if ("speechSynthesis" in window) {
       window.speechSynthesis.cancel();
-
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = 0.8;
-      utterance.pitch = 1.1;
       utterance.volume = 0.8;
-
-      utterance.onerror = (event) => {
-        console.warn("Speech synthesis error:", event.error);
-      };
-
       window.speechSynthesis.speak(utterance);
     }
   };
@@ -577,15 +437,13 @@ const ScannerPage = () => {
     if (file.size > maxSize) {
       throw new Error("File size too large. Maximum size is 10MB.");
     }
-
     if (!allowedTypes.includes(file.type.toLowerCase())) {
       throw new Error("Invalid file type. Please upload a valid image file.");
     }
-
     return true;
   };
 
-  // **FIXED: handleImageUpload function with proper null checks**
+  // **FIXED: Enhanced image upload with safe navigation**
   const handleImageUpload = async (file) => {
     if (!file) return;
 
@@ -597,77 +455,46 @@ const ScannerPage = () => {
     }
 
     if (!checkNetworkConnection()) {
-      setError(
-        "No internet connection. Please check your network and try again."
-      );
+      setError("No internet connection.");
       return;
     }
 
-    // **FIX: Check if scanner is initialized before using scanFile**
-    if (!scannerRef.current) {
-      setError(
-        "Scanner not initialized. Please wait for the scanner to load or refresh the page."
-      );
-      return;
-    }
-
-    // **FIX: Additional check for scanner state and method availability**
-    try {
-      if (typeof scannerRef.current.scanFile !== "function") {
-        setError("Scanner not ready. Please try again in a moment.");
-        return;
-      }
-    } catch (err) {
-      console.error("Scanner state check failed:", err);
-      setError("Scanner not available. Please refresh the page and try again.");
+    if (
+      !scannerRef.current ||
+      typeof scannerRef.current.scanFile !== "function"
+    ) {
+      setError("Scanner not ready. Please wait for initialization.");
       return;
     }
 
     setImageFile(file);
     setError("");
     setSuccess("");
-    setScanResult(null);
     setLoading(true);
 
     try {
-      console.log("Attempting to scan uploaded image...");
       const result = await scannerRef.current.scanFile(file, true);
-      console.log("Image scan result:", result);
       await handleScanSuccess(result);
     } catch (err) {
       console.error("Image scan error:", err);
-      let errorMessage = "Failed to scan QR code from image.";
-
-      // **Enhanced error messages based on error type**
-      if (err.message?.includes("QR code not found")) {
-        errorMessage =
-          "No QR code found in the uploaded image. Please ensure the image contains a clear QR code.";
-      } else if (err.message?.includes("Unable to decode")) {
-        errorMessage =
-          "Unable to decode QR code. Please try with a clearer image.";
-      } else if (err.message) {
-        errorMessage = `Scan failed: ${err.message}`;
-      }
-
-      setError(errorMessage);
-      speak("Scan Failed");
+      const errorMessage = err.message?.includes("QR code not found")
+        ? "No QR code found in the uploaded image."
+        : `Scan failed: ${err.message}`;
 
       const scanResultData = {
         success: false,
         message: errorMessage,
-        entryExitMessage: "",
         user: null,
         entryTime: null,
         exitTime: null,
       };
 
-      safeLocalStorage.set("scanResult", scanResultData);
-      navigate("/", {
-        state: {
-          activeTab: "home",
-          scanResult: scanResultData,
-        },
-      });
+      speak("Scan Failed");
+
+      // **KEY: Navigate to home even on image scan error**
+      setTimeout(async () => {
+        await navigateToHome(scanResultData);
+      }, 500);
     } finally {
       setLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -688,17 +515,7 @@ const ScannerPage = () => {
     e.preventDefault();
     setDragActive(false);
     const file = e.dataTransfer.files[0];
-    if (file) {
-      await handleImageUpload(file);
-    }
-  };
-
-  const handleScanAgain = () => {
-    setError("");
-    setSuccess("");
-    setScanResult(null);
-    setImageFile(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
+    if (file) await handleImageUpload(file);
   };
 
   const closeTutorial = () => {
@@ -732,17 +549,11 @@ const ScannerPage = () => {
                   </div>
                   <div className="flex items-start">
                     <QrCodeIcon className="w-5 h-5 text-purple-500 mr-2 mt-0.5 flex-shrink-0" />
-                    <p>
-                      Point the camera at the QR code for automatic scanning
-                    </p>
+                    <p>Point camera at QR code or upload an image</p>
                   </div>
                   <div className="flex items-start">
-                    <PhotoIcon className="w-5 h-5 text-green-500 mr-2 mt-0.5 flex-shrink-0" />
-                    <p>Upload or drag & drop QR code images as alternative</p>
-                  </div>
-                  <div className="flex items-start">
-                    <ShieldExclamationIcon className="w-5 h-5 text-amber-500 mr-2 mt-0.5 flex-shrink-0" />
-                    <p>Works with built-in, USB, and mobile cameras</p>
+                    <CheckCircleIcon className="w-5 h-5 text-green-500 mr-2 mt-0.5 flex-shrink-0" />
+                    <p>You'll be redirected to home after scanning</p>
                   </div>
                 </div>
                 <button
@@ -751,6 +562,72 @@ const ScannerPage = () => {
                 >
                   Got It!
                 </button>
+              </div>
+            </div>
+          )}
+
+          {/* Header */}
+          <div className="text-center mb-8">
+            <div className="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl mb-6 shadow-lg">
+              <QrCodeIcon className="w-10 h-10 text-white" />
+            </div>
+            <h2 className="text-4xl font-bold bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent mb-2">
+              QR Scanner
+            </h2>
+            <p className="text-lg text-gray-600">
+              Scan visitor QR codes for entry/exit logging
+            </p>
+            {scanCount > 0 && (
+              <p className="text-sm text-gray-500 mt-2">
+                Scans today: {scanCount}
+              </p>
+            )}
+          </div>
+
+          {/* Status Messages */}
+          {!isOnline && (
+            <div className="mb-4 p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-center">
+              <WifiIcon className="w-5 h-5 text-rose-500 mr-2" />
+              <span className="text-rose-700 text-sm">
+                You're offline. Scanning requires internet connection.
+              </span>
+            </div>
+          )}
+
+          {cameraError && !showPermissionDialog && (
+            <div className="mb-6 p-4 bg-amber-50/80 backdrop-blur-sm border border-amber-200 rounded-xl">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center">
+                  <ExclamationTriangleIcon className="w-5 h-5 text-amber-600 mr-2 flex-shrink-0" />
+                  <div>
+                    <p className="text-amber-700 font-medium">Camera Issue</p>
+                    <p className="text-amber-600 mt-1">{cameraError}</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowPermissionDialog(true)}
+                  className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm hover:bg-amber-700 transition-colors"
+                >
+                  Try Again
+                </button>
+              </div>
+            </div>
+          )}
+
+          {error && (
+            <div className="mb-6 p-4 bg-rose-50/80 backdrop-blur-sm border border-rose-200 rounded-xl">
+              <div className="flex items-center">
+                <ExclamationTriangleIcon className="w-5 h-5 text-rose-500 mr-2 flex-shrink-0" />
+                <p className="text-rose-700">{error}</p>
+              </div>
+            </div>
+          )}
+
+          {success && (
+            <div className="mb-6 p-4 bg-emerald-50/80 backdrop-blur-sm border border-emerald-200 rounded-xl">
+              <div className="flex items-center">
+                <CheckCircleIcon className="w-5 h-5 text-emerald-500 mr-2 flex-shrink-0" />
+                <p className="text-emerald-700">{success}</p>
               </div>
             </div>
           )}
@@ -765,12 +642,9 @@ const ScannerPage = () => {
                     Camera Access Required
                   </h3>
                   <p className="text-amber-700">
-                    To scan QR codes, we need access to your camera. This works
-                    with built-in cameras, USB cameras, and mobile cameras
-                    connected to your device.
+                    To scan QR codes, we need access to your camera.
                   </p>
                 </div>
-
                 <div className="flex justify-center space-x-3">
                   <button
                     onClick={requestCameraPermission}
@@ -793,95 +667,10 @@ const ScannerPage = () => {
                     onClick={() => setShowPermissionDialog(false)}
                     className="px-4 py-2 bg-gray-500 text-white rounded-xl hover:bg-gray-600 transition-colors duration-300"
                   >
-                    Use Image Upload Instead
+                    Use Image Upload
                   </button>
                 </div>
               </div>
-            </div>
-          )}
-
-          {/* Offline Indicator */}
-          {!isOnline && (
-            <div className="mb-4 p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-center">
-              <WifiIcon className="w-5 h-5 text-rose-500 mr-2" />
-              <span className="text-rose-700 text-sm">
-                You're offline. Scanning requires internet connection.
-              </span>
-            </div>
-          )}
-
-          {/* Header */}
-          <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl mb-6 shadow-lg">
-              <QrCodeIcon className="w-10 h-10 text-white" />
-            </div>
-            <h2 className="text-4xl font-bold bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent mb-2">
-              QR Scanner
-            </h2>
-            <p className="text-lg text-gray-600">
-              Scan visitor QR codes for entry/exit logging
-            </p>
-            {scanCount > 0 && (
-              <p className="text-sm text-gray-500 mt-2">
-                Scans today: {scanCount}
-              </p>
-            )}
-          </div>
-
-          {/* Camera Error */}
-          {cameraError && !showPermissionDialog && (
-            <div className="mb-6 p-4 bg-amber-50/80 backdrop-blur-sm border border-amber-200 rounded-xl">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center">
-                  <ExclamationTriangleIcon className="w-5 h-5 text-amber-600 mr-2 flex-shrink-0" />
-                  <div>
-                    <p className="text-amber-700 font-medium">Camera Issue</p>
-                    <p className="text-amber-600 mt-1">{cameraError}</p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => setShowPermissionDialog(true)}
-                  className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm hover:bg-amber-700 transition-colors"
-                >
-                  Try Again
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Status Messages */}
-          {error && (
-            <div className="mb-6 p-4 bg-rose-50/80 backdrop-blur-sm border border-rose-200 rounded-xl animate-shake">
-              <div className="flex items-center">
-                <ExclamationTriangleIcon className="w-5 h-5 text-rose-500 mr-2 flex-shrink-0" />
-                <div>
-                  <p className="text-rose-700 font-medium">Scan Failed:</p>
-                  <p className="text-rose-600 mt-1">{error}</p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {success && (
-            <div className="mb-6 space-y-3">
-              <div className="p-4 bg-emerald-50/80 backdrop-blur-sm border border-emerald-200 rounded-xl">
-                <div className="flex items-center">
-                  <CheckCircleIcon className="w-5 h-5 text-emerald-500 mr-2 flex-shrink-0" />
-                  <div>
-                    <p className="text-emerald-700 font-medium">
-                      Scan Successful:
-                    </p>
-                    <p className="text-emerald-600 mt-1">{success}</p>
-                  </div>
-                </div>
-              </div>
-              {entryExitMessage && (
-                <div className="p-3 bg-indigo-50/80 backdrop-blur-sm border border-indigo-200 rounded-xl text-center">
-                  <p className="text-indigo-700 font-semibold">
-                    {entryExitMessage}
-                  </p>
-                </div>
-              )}
             </div>
           )}
 
@@ -889,64 +678,25 @@ const ScannerPage = () => {
           <div className="space-y-6">
             <div
               id="qr-reader"
-              className={`w-full ${
-                isScanning ? "block" : "hidden"
-              } relative border-4 border-gradient-to-r from-indigo-500 to-purple-600 rounded-2xl overflow-hidden shadow-lg ${
-                lastScanned ? "animate-pulse" : ""
-              }`}
+              className={`w-full ${isScanning ? "block" : "hidden"} relative border-4 border-gradient-to-r from-indigo-500 to-purple-600 rounded-2xl overflow-hidden shadow-lg`}
               style={{ minHeight: "280px" }}
             >
-              {isScanning && (
-                <div className="absolute inset-0 bg-transparent z-10">
-                  <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
-                    <div className="w-64 h-64 border-4 border-white/50 border-dashed rounded-lg animate-pulse" />
+              {isScanning && loading && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/30 backdrop-blur-sm z-10">
+                  <div className="bg-white/90 rounded-xl p-4 flex items-center">
+                    <div className="w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mr-3" />
+                    <p className="text-gray-700 font-medium">
+                      Processing scan...
+                    </p>
                   </div>
-                  {loading && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-                      <div className="bg-white/90 rounded-xl p-4 flex items-center">
-                        <div className="w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mr-3" />
-                        <p className="text-gray-700 font-medium">
-                          Processing scan...
-                        </p>
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
             </div>
 
-            {/* Camera Controls */}
+            {/* Controls */}
             {!isScanning ? (
               <div className="space-y-6">
-                {scanResult && (
-                  <div className="p-4 bg-gray-50/70 backdrop-blur-sm border border-gray-200 rounded-xl">
-                    <h3 className="font-semibold text-gray-800 mb-2">
-                      Last Scan Result:
-                    </h3>
-                    <div className="space-y-1 text-sm text-gray-600">
-                      <p>
-                        <strong>Name:</strong> {scanResult.user?.name}
-                      </p>
-                      <p>
-                        <strong>Email:</strong> {scanResult.user?.email}
-                      </p>
-                      {scanResult.entryTime && (
-                        <p>
-                          <strong>Entry:</strong>{" "}
-                          {new Date(scanResult.entryTime).toLocaleString()}
-                        </p>
-                      )}
-                      {scanResult.exitTime && (
-                        <p>
-                          <strong>Exit:</strong>{" "}
-                          {new Date(scanResult.exitTime).toLocaleString()}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* **ENHANCED: Multiple Camera Selection** */}
+                {/* Camera Selection */}
                 {devices.length > 0 && (
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -955,12 +705,8 @@ const ScannerPage = () => {
                     </label>
                     <select
                       value={cameraId || ""}
-                      onChange={(e) => {
-                        console.log("Camera changed to:", e.target.value);
-                        setCameraId(e.target.value);
-                      }}
+                      onChange={(e) => setCameraId(e.target.value)}
                       className="w-full px-4 py-3 bg-white/70 backdrop-blur-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-4 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all duration-300"
-                      aria-label="Select camera for scanning"
                     >
                       {devices.map((device, index) => (
                         <option key={device.id} value={device.id}>
@@ -968,27 +714,6 @@ const ScannerPage = () => {
                         </option>
                       ))}
                     </select>
-                    {devices.length > 1 && (
-                      <p className="mt-1 text-xs text-gray-500">
-                        💡 Tip: USB and external cameras often provide better
-                        quality for QR scanning
-                      </p>
-                    )}
-                  </div>
-                )}
-
-                {/* Debug Info */}
-                {devices.length === 0 && permissionState === "granted" && (
-                  <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl">
-                    <p className="text-blue-700 text-sm">
-                      🔄 Camera permission granted but no devices found.
-                      <button
-                        onClick={() => initializeCameras()}
-                        className="ml-2 text-blue-800 underline hover:no-underline"
-                      >
-                        Try Again
-                      </button>
-                    </p>
                   </div>
                 )}
 
@@ -999,9 +724,8 @@ const ScannerPage = () => {
                       ? startScanner
                       : () => setShowPermissionDialog(true)
                   }
-                  disabled={!isOnline}
+                  disabled={!isOnline || loading}
                   className="w-full bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-semibold py-4 px-6 rounded-xl shadow-lg hover:shadow-xl transform hover:scale-[1.02] focus:outline-none focus:ring-4 focus:ring-indigo-500/20 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
-                  aria-label="Start camera scanning"
                 >
                   {permissionState === "granted" && cameraId ? (
                     <>
@@ -1016,12 +740,11 @@ const ScannerPage = () => {
                   )}
                 </button>
 
-                {/* **ENHANCED: File Upload Area with Scanner Status** */}
+                {/* File Upload */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     <PhotoIcon className="w-4 h-4 inline mr-1" />
                     Or Upload QR Code Image
-                    {/* **ADD SCANNER STATUS** */}
                     {!scannerReady && (
                       <span className="ml-2 text-xs text-amber-600">
                         (Scanner initializing...)
@@ -1049,7 +772,6 @@ const ScannerPage = () => {
                         scannerReady && handleImageUpload(e.target.files[0])
                       }
                       className="hidden"
-                      aria-label="Upload QR code image"
                       disabled={!scannerReady}
                     />
                     <label
@@ -1077,26 +799,15 @@ const ScannerPage = () => {
                     </div>
                   )}
                 </div>
-
-                {/* Scan Again Button */}
-                {(scanResult || imageFile) && (
-                  <button
-                    onClick={handleScanAgain}
-                    className="w-full bg-gray-600 text-white font-semibold py-3 px-6 rounded-xl hover:bg-gray-700 focus:outline-none focus:ring-4 focus:ring-gray-500/20 transition-all duration-300 transform hover:scale-[1.02]"
-                  >
-                    <QrCodeIcon className="w-5 h-5 inline mr-2" />
-                    Scan Another Code
-                  </button>
-                )}
               </div>
             ) : (
               <button
                 onClick={stopScanner}
-                className="w-full bg-rose-500 text-white font-semibold py-4 px-6 rounded-xl shadow-lg hover:bg-rose-600 focus:outline-none focus:ring-4 focus:ring-rose-500/20 transition-all duration-300 transform hover:scale-[1.02]"
-                aria-label="Stop camera scanning"
+                disabled={loading}
+                className="w-full bg-rose-500 text-white font-semibold py-4 px-6 rounded-xl shadow-lg hover:bg-rose-600 focus:outline-none focus:ring-4 focus:ring-rose-500/20 transition-all duration-300 transform hover:scale-[1.02] disabled:opacity-50"
               >
                 <StopIcon className="w-5 h-5 inline mr-2" />
-                Stop Scanning
+                {loading ? "Processing..." : "Stop Scanning"}
               </button>
             )}
           </div>
