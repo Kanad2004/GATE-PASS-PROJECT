@@ -1,9 +1,9 @@
 import axios from "axios";
 
-// **API Configuration - Using your existing pattern**
+// **API Configuration**
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
-const REQUEST_TIMEOUT = 15000; // 15 seconds for better reliability
+const REQUEST_TIMEOUT = 15000;
 
 // Create axios instance with enhanced configuration
 const api = axios.create({
@@ -12,19 +12,35 @@ const api = axios.create({
   headers: {
     "Content-Type": "application/json",
   },
-  // Enhanced retry configuration
-  retry: 3,
-  retryDelay: 1000,
+  withCredentials: true, // **IMPORTANT: Enable cookies for refresh tokens**
 });
 
 // Enhanced request interceptor for token and logging
 api.interceptors.request.use(
-  (config) => {
+  async (config) => {
     // Add request metadata for tracking
     config.metadata = {
       startTime: Date.now(),
       requestId: Math.random().toString(36).substr(2, 9),
     };
+
+    // **AUTO TOKEN REFRESH: Check if token needs refresh before API calls**
+    const user = safeLocalStorage.get("user");
+    if (user?.accessToken && user?.tokenExpiry) {
+      const now = Date.now();
+      const timeUntilExpiry = user.tokenExpiry - now;
+
+      // Refresh token if it expires in less than 5 minutes
+      if (timeUntilExpiry < 5 * 60 * 1000) {
+        console.log("🔄 Token expires soon, attempting refresh...");
+        try {
+          await refreshAccessToken();
+        } catch (error) {
+          console.warn("Failed to refresh token:", error);
+          // Continue with existing token
+        }
+      }
+    }
 
     // Development logging
     if (import.meta.env.DEV) {
@@ -43,7 +59,7 @@ api.interceptors.request.use(
   }
 );
 
-// Enhanced response interceptor with better error handling
+// Enhanced response interceptor with automatic token refresh
 api.interceptors.response.use(
   (response) => {
     // Log response time in development
@@ -55,7 +71,32 @@ api.interceptors.response.use(
     }
     return response;
   },
-  (error) => {
+  async (error) => {
+    const originalRequest = error.config;
+
+    // **AUTO TOKEN REFRESH: Handle 401 errors with token refresh**
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      originalRequest._retry = true;
+
+      try {
+        console.log("🔄 401 error, attempting token refresh...");
+        await refreshAccessToken();
+
+        // Retry the original request with new token
+        const user = safeLocalStorage.get("user");
+        if (user?.accessToken) {
+          originalRequest.headers.Authorization = `Bearer ${user.accessToken}`;
+          return api(originalRequest);
+        }
+      } catch (refreshError) {
+        console.error("Token refresh failed:", refreshError);
+        // Clear invalid tokens and redirect to login
+        safeLocalStorage.remove("user");
+        window.location.href = "/login";
+        throw new Error("Session expired. Please login again.");
+      }
+    }
+
     // Enhanced error handling with detailed logging
     const errorInfo = {
       code: error.code,
@@ -93,9 +134,12 @@ api.interceptors.response.use(
       case 400:
         throw new Error(serverMessage || "Invalid request data");
       case 401:
-        // Clear invalid token
-        safeLocalStorage.remove("user");
-        throw new Error("Session expired. Please login again.");
+        // Clear invalid token (if not already handled by refresh logic)
+        if (originalRequest._retry) {
+          safeLocalStorage.remove("user");
+          throw new Error("Session expired. Please login again.");
+        }
+        break;
       case 403:
         throw new Error("Access denied. Insufficient permissions.");
       case 404:
@@ -126,7 +170,7 @@ api.interceptors.response.use(
   }
 );
 
-// **Enhanced Safe localStorage utility with error recovery**
+// **Enhanced Safe localStorage utility**
 const safeLocalStorage = {
   get: (key) => {
     try {
@@ -144,7 +188,7 @@ const safeLocalStorage = {
       return parsed._data !== undefined ? parsed._data : parsed;
     } catch (error) {
       console.warn(`Failed to parse localStorage item '${key}':`, error);
-      localStorage.removeItem(key); // Remove corrupted data
+      localStorage.removeItem(key);
       return null;
     }
   },
@@ -153,7 +197,6 @@ const safeLocalStorage = {
     try {
       let dataToStore = value;
 
-      // Add expiration if specified
       if (expirationMs) {
         dataToStore = {
           _data: value,
@@ -195,8 +238,8 @@ const sanitizeInput = (input) => {
   if (typeof input === "string") {
     return input
       .trim()
-      .replace(/[<>\"']/g, "") // Basic XSS protection
-      .substring(0, 1000); // Prevent excessive length
+      .replace(/[<>\"']/g, "")
+      .substring(0, 1000);
   }
   return input;
 };
@@ -207,14 +250,12 @@ const validateResponse = (response, expectedFields = []) => {
     throw new Error("Invalid server response format");
   }
 
-  // Handle different response structures from your backend
   const data = response.data.data || response.data;
 
   if (!data) {
     throw new Error("Empty response from server");
   }
 
-  // Check for required fields
   for (const field of expectedFields) {
     if (!(field in data)) {
       throw new Error(`Missing required field in response: ${field}`);
@@ -224,11 +265,108 @@ const validateResponse = (response, expectedFields = []) => {
   return data;
 };
 
-// **API Functions - Updated to match your backend structure**
+// **NEW: Token refresh function**
+const refreshAccessToken = async () => {
+  try {
+    const response = await api.post(
+      "/admin/refresh-token",
+      {},
+      {
+        withCredentials: true, // Send cookies with refresh token
+      }
+    );
 
+    const data = validateResponse(response, ["accessToken"]);
+
+    // Update stored user data with new token
+    const user = safeLocalStorage.get("user");
+    if (user) {
+      const updatedUser = {
+        ...user,
+        accessToken: data.accessToken,
+        tokenExpiry: Date.now() + 15 * 60 * 1000, // Assume 15 min expiry
+      };
+      safeLocalStorage.set("user", updatedUser);
+      console.log("✅ Access token refreshed successfully");
+    }
+
+    return data.accessToken;
+  } catch (error) {
+    console.error("Token refresh failed:", error);
+    throw error;
+  }
+};
+
+// **UPDATED: Enhanced login function with proper token storage**
+export const loginAdmin = async (data) => {
+  try {
+    const sanitizedData = {
+      name: sanitizeInput(data.name),
+      password: data.password,
+    };
+
+    if (!sanitizedData.name || !sanitizedData.password) {
+      throw new Error("Username and password are required");
+    }
+
+    const response = await api.post("/admin/login", sanitizedData, {
+      withCredentials: true, // Important for cookies
+    });
+
+    const responseData = validateResponse(response, ["admin", "accessToken"]);
+
+    // **ENHANCED: Store user data with token expiry tracking**
+    const userData = {
+      admin: responseData.admin,
+      accessToken: responseData.accessToken,
+      refreshToken: responseData.refreshToken, // Store refresh token too
+      role: "admin",
+      tokenExpiry: Date.now() + 15 * 60 * 1000, // Assume 15 minutes expiry
+      loginTime: Date.now(),
+    };
+
+    safeLocalStorage.set("user", userData);
+
+    console.log("✅ Admin logged in successfully:", responseData.admin.name);
+    return responseData;
+  } catch (error) {
+    throw error;
+  }
+};
+
+// **NEW: Logout function**
+export const logoutAdmin = async () => {
+  try {
+    const user = safeLocalStorage.get("user");
+
+    if (user?.accessToken) {
+      // Call backend logout to clear cookies
+      await api.post(
+        "/admin/logout",
+        {},
+        {
+          headers: { Authorization: `Bearer ${user.accessToken}` },
+          withCredentials: true,
+        }
+      );
+    }
+
+    // Clear local storage
+    safeLocalStorage.remove("user");
+    console.log("✅ Admin logged out successfully");
+
+    return true;
+  } catch (error) {
+    // Even if logout fails, clear local storage
+    safeLocalStorage.remove("user");
+    console.warn("Logout API failed, but cleared local storage:", error);
+    return true;
+  }
+};
+
+// **UPDATED: Enhanced API functions with proper token handling**
 export const sendOtp = async (data) => {
   try {
-    // Enhanced input validation and sanitization
     const sanitizedData = {
       email: sanitizeInput(data.email?.toLowerCase()),
       name: sanitizeInput(data.name),
@@ -239,7 +377,6 @@ export const sendOtp = async (data) => {
       visitDateAndTime: data.visitDateAndTime,
     };
 
-    // Validate required fields
     if (
       !sanitizedData.email ||
       !sanitizedData.name ||
@@ -252,7 +389,7 @@ export const sendOtp = async (data) => {
     const response = await api.post("/user/send-otp", sanitizedData);
     return validateResponse(response);
   } catch (error) {
-    throw error; // Re-throw processed error
+    throw error;
   }
 };
 
@@ -260,39 +397,19 @@ export const verifyOtp = async (data) => {
   try {
     const sanitizedData = {
       email: sanitizeInput(data.email?.toLowerCase()),
-      otp: sanitizeInput(data.otp?.replace(/\D/g, "")), // Only digits
+      otp: sanitizeInput(data.otp?.replace(/\D/g, "")),
       name: sanitizeInput(data.name),
       mobileNumber: sanitizeInput(data.mobileNumber),
       purpose: sanitizeInput(data.purpose),
       visitDateAndTime: data.visitDateAndTime,
     };
 
-    // Validate OTP format
     if (!sanitizedData.otp || sanitizedData.otp.length !== 6) {
       throw new Error("Please enter a valid 6-digit OTP");
     }
 
     const response = await api.post("/user/verify-otp", sanitizedData);
     return validateResponse(response);
-  } catch (error) {
-    throw error;
-  }
-};
-
-export const loginAdmin = async (data) => {
-  try {
-    const sanitizedData = {
-      name: sanitizeInput(data.name),
-      password: data.password, // Don't sanitize passwords
-    };
-
-    // Basic validation
-    if (!sanitizedData.name || !sanitizedData.password) {
-      throw new Error("Username and password are required");
-    }
-
-    const response = await api.post("/admin/login", sanitizedData);
-    return validateResponse(response, ["admin", "accessToken"]);
   } catch (error) {
     throw error;
   }
@@ -364,14 +481,12 @@ export const scanQr = async (qrString, token) => {
   }
 };
 
-// **NEW: PDF Report Generation Function - Matching your router**
 export const generateVisitorReport = async (filters, token) => {
   try {
     if (!token) {
       throw new Error("Authentication token is required");
     }
 
-    // Sanitize filter inputs
     const sanitizedFilters = {
       startDate: sanitizeInput(filters.startDate),
       endDate: sanitizeInput(filters.endDate),
@@ -381,7 +496,6 @@ export const generateVisitorReport = async (filters, token) => {
 
     const queryParams = new URLSearchParams(sanitizedFilters);
 
-    // **UPDATED: Use your actual route path**
     const response = await api.get(
       `/user/generate-visitor-report?${queryParams}`,
       {
@@ -389,11 +503,11 @@ export const generateVisitorReport = async (filters, token) => {
           Authorization: `Bearer ${token}`,
           Accept: "application/pdf",
         },
-        responseType: "blob", // Important for PDF downloads
+        responseType: "blob",
       }
     );
 
-    return response.data; // Return blob directly
+    return response.data;
   } catch (error) {
     throw error;
   }
@@ -405,10 +519,8 @@ export const checkNetworkConnection = () => {
     return false;
   }
 
-  // Additional check for connection quality if available
   if (window.navigator.connection) {
     const connection = window.navigator.connection;
-    // Avoid very slow connections
     if (connection.effectiveType === "slow-2g" || connection.downlink < 0.5) {
       return false;
     }
@@ -417,13 +529,12 @@ export const checkNetworkConnection = () => {
   return true;
 };
 
-// **Enhanced rate limiting utility with better cleanup**
+// **Enhanced rate limiting utility**
 const rateLimiter = new Map();
 export const checkRateLimit = (key, maxRequests = 5, windowMs = 60000) => {
   const now = Date.now();
   const requests = rateLimiter.get(key) || [];
 
-  // Clean old requests (more efficient cleanup)
   const validRequests = requests.filter((time) => now - time < windowMs);
 
   if (validRequests.length >= maxRequests) {
@@ -437,7 +548,6 @@ export const checkRateLimit = (key, maxRequests = 5, windowMs = 60000) => {
   validRequests.push(now);
   rateLimiter.set(key, validRequests);
 
-  // Cleanup old entries periodically
   if (rateLimiter.size > 100) {
     rateLimiter.forEach((value, key) => {
       const validEntries = value.filter((time) => now - time < windowMs);
@@ -452,19 +562,17 @@ export const checkRateLimit = (key, maxRequests = 5, windowMs = 60000) => {
   return true;
 };
 
-// **Utility function for file downloads**
+// **Utility functions**
 export const downloadFile = (
   blob,
   filename,
   mimeType = "application/octet-stream"
 ) => {
   try {
-    // Validate blob
     if (!(blob instanceof Blob)) {
       throw new Error("Invalid file data");
     }
 
-    // Create download URL
     const url = window.URL.createObjectURL(
       new Blob([blob], { type: mimeType })
     );
@@ -472,11 +580,9 @@ export const downloadFile = (
     link.href = url;
     link.download = filename;
 
-    // Trigger download
     document.body.appendChild(link);
     link.click();
 
-    // Cleanup
     document.body.removeChild(link);
     window.URL.revokeObjectURL(url);
 
@@ -487,7 +593,6 @@ export const downloadFile = (
   }
 };
 
-// **Health check function**
 export const healthCheck = async () => {
   try {
     const response = await api.get("/health", { timeout: 5000 });
@@ -497,7 +602,7 @@ export const healthCheck = async () => {
   }
 };
 
-// **Session validation function**
+// **UPDATED: Session validation with token refresh**
 export const validateSession = async (token) => {
   try {
     if (!token) return false;
@@ -509,21 +614,51 @@ export const validateSession = async (token) => {
 
     return response.status === 200;
   } catch (error) {
-    return false;
+    // Try to refresh token if validation fails
+    try {
+      await refreshAccessToken();
+      return true;
+    } catch (refreshError) {
+      return false;
+    }
   }
 };
 
+// **NEW: Check if user is logged in and token is valid**
+export const isLoggedIn = () => {
+  const user = safeLocalStorage.get("user");
+  if (!user || !user.accessToken) return false;
+
+  // Check if token is expired
+  if (user.tokenExpiry && Date.now() > user.tokenExpiry + 5 * 60 * 1000) {
+    // Token expired more than 5 minutes ago, likely invalid
+    return false;
+  }
+
+  return true;
+};
+
 // **Export all utilities**
-export { safeLocalStorage, sanitizeInput, validateResponse, api as apiClient };
+export {
+  safeLocalStorage,
+  sanitizeInput,
+  validateResponse,
+  api as apiClient,
+  refreshAccessToken,
+};
 
 // **Debug function for development**
 export const debugAPI = () => {
   if (import.meta.env.DEV) {
+    const user = safeLocalStorage.get("user");
     console.log("🔧 API Debug Info:", {
       baseURL: API_BASE_URL,
       timeout: REQUEST_TIMEOUT,
       rateLimiterSize: rateLimiter.size,
       networkStatus: checkNetworkConnection(),
+      userLoggedIn: !!user,
+      tokenExpiry: user?.tokenExpiry ? new Date(user.tokenExpiry) : null,
+      tokenValid: isLoggedIn(),
     });
   }
 };

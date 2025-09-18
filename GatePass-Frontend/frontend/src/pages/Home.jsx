@@ -5,6 +5,7 @@ import {
   safeLocalStorage,
   checkNetworkConnection,
   checkRateLimit,
+  logoutAdmin,
 } from "../utils/api";
 import DatePicker from "react-datepicker";
 import "react-datepicker/dist/react-datepicker.css";
@@ -23,7 +24,7 @@ import {
   ShieldCheckIcon,
   WifiIcon,
   SparklesIcon,
-  DocumentArrowDownIcon, // Added for visitor reports
+  DocumentArrowDownIcon,
 } from "@heroicons/react/24/outline";
 
 const Home = () => {
@@ -59,7 +60,7 @@ const Home = () => {
     };
   }, []);
 
-  // Enhanced location state handling
+  // **FIXED: Enhanced location state handling with proper cleanup**
   useEffect(() => {
     try {
       if (location.state?.activeTab) {
@@ -70,6 +71,10 @@ const Home = () => {
         setScanResult(location.state.scanResult);
         setShowSuccessAnimation(true);
         const timer = setTimeout(() => setShowSuccessAnimation(false), 3000);
+
+        // **FIX: Clear location state to prevent re-showing on refresh**
+        window.history.replaceState({}, document.title);
+
         return () => clearTimeout(timer);
       }
 
@@ -77,7 +82,7 @@ const Home = () => {
       const savedResult = safeLocalStorage.get("scanResult");
       if (savedResult && !scanResult) {
         setScanResult(savedResult);
-        safeLocalStorage.remove("scanResult");
+        safeLocalStorage.remove("scanResult"); // **FIX: Clean up immediately**
         setShowSuccessAnimation(true);
         const timer = setTimeout(() => setShowSuccessAnimation(false), 3000);
         return () => clearTimeout(timer);
@@ -85,7 +90,20 @@ const Home = () => {
     } catch (error) {
       console.error("Error processing location state:", error);
     }
-  }, [location.state, scanResult]);
+  }, [location.state]);
+
+  // **FIXED: Close scan result handler**
+  const handleCloseScanResult = useCallback(() => {
+    console.log("Close button clicked!"); // Debug log
+    setScanResult(null);
+    setShowSuccessAnimation(false);
+    safeLocalStorage.remove("scanResult");
+
+    // **FIX: Also clear any remaining location state**
+    if (location.state?.scanResult) {
+      window.history.replaceState({}, document.title);
+    }
+  }, [location.state]);
 
   // Enhanced form validation with international support
   const validate = useCallback(() => {
@@ -169,13 +187,12 @@ const Home = () => {
     return newErrors;
   }, [formData, visitDateTime]);
 
-  // **FIX: Stable input change handlers using useCallback**
+  // **Stable input change handlers using useCallback**
   const handleNameChange = useCallback(
     (e) => {
       const value = e.target.value;
       setFormData((prev) => ({ ...prev, name: value }));
 
-      // Clear field-specific error
       if (errors.name) {
         setErrors((prev) => ({ ...prev, name: "" }));
       }
@@ -188,7 +205,6 @@ const Home = () => {
       const value = e.target.value;
       setFormData((prev) => ({ ...prev, email: value }));
 
-      // Clear field-specific error
       if (errors.email) {
         setErrors((prev) => ({ ...prev, email: "" }));
       }
@@ -201,7 +217,6 @@ const Home = () => {
       const value = e.target.value;
       setFormData((prev) => ({ ...prev, mobileNumber: value }));
 
-      // Clear field-specific error
       if (errors.mobileNumber) {
         setErrors((prev) => ({ ...prev, mobileNumber: "" }));
       }
@@ -214,7 +229,6 @@ const Home = () => {
       const value = e.target.value;
       setFormData((prev) => ({ ...prev, purpose: value }));
 
-      // Clear field-specific error
       if (errors.purpose) {
         setErrors((prev) => ({ ...prev, purpose: "" }));
       }
@@ -226,7 +240,6 @@ const Home = () => {
     (date) => {
       setVisitDateTime(date);
 
-      // Clear field-specific error
       if (errors.visitDateTime) {
         setErrors((prev) => ({ ...prev, visitDateTime: "" }));
       }
@@ -240,7 +253,7 @@ const Home = () => {
     // Clear previous errors
     setErrors({});
 
-    // **FIX: Clear any existing OTP timer when starting new registration**
+    // Clear any existing OTP timer when starting new registration
     safeLocalStorage.remove("otpStartTime");
 
     // Network check
@@ -310,7 +323,6 @@ const Home = () => {
         errorMessage = error.message;
       }
 
-      // Add attempt info for multiple failures
       if (submitAttempts >= 2) {
         errorMessage += ` (Attempt ${submitAttempts + 1})`;
       }
@@ -326,10 +338,18 @@ const Home = () => {
     return user && user.role === "admin";
   }, []);
 
-  const handleLogout = useCallback(() => {
-    safeLocalStorage.remove("user");
-    setActiveTab("home");
-    navigate("/");
+  const handleLogout = useCallback(async () => {
+    try {
+      await logoutAdmin();
+      setActiveTab("home");
+      navigate("/");
+    } catch (error) {
+      console.error("Logout error:", error);
+      // Even if logout fails, clear local data
+      safeLocalStorage.remove("user");
+      setActiveTab("home");
+      navigate("/");
+    }
   }, [navigate]);
 
   const TabButton = ({
@@ -362,7 +382,7 @@ const Home = () => {
     </button>
   );
 
-  // **FIX: Stable InputField component to prevent re-renders**
+  // **Stable InputField component to prevent re-renders**
   const InputField = useCallback(
     ({
       id,
@@ -424,9 +444,10 @@ const Home = () => {
       </div>
     ),
     []
-  ); // Empty dependency array makes it stable
+  );
 
-  const SuccessCard = ({ result }) => (
+  // **FIXED: SuccessCard component with proper onClose handler**
+  const SuccessCard = ({ result, onClose }) => (
     <div
       className={`bg-gradient-to-br from-emerald-50 to-teal-50 border-2 border-emerald-200 rounded-2xl p-6 shadow-lg transform transition-all duration-500 ${
         showSuccessAnimation ? "animate-slideIn scale-105" : ""
@@ -483,9 +504,15 @@ const Home = () => {
           </div>
         )}
 
+        {/* **FIXED: Close button with proper event handling** */}
         <button
-          onClick={() => setScanResult(null)}
-          className="mt-4 px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors duration-200"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            console.log("Close button clicked in SuccessCard"); // Debug log
+            onClose();
+          }}
+          className="mt-4 px-6 py-3 bg-gray-600 text-white rounded-xl hover:bg-gray-700 focus:outline-none focus:ring-4 focus:ring-gray-500/20 transition-all duration-200 font-medium"
         >
           Close
         </button>
@@ -584,7 +611,13 @@ const Home = () => {
         <main className="max-w-4xl mx-auto">
           {activeTab === "home" && (
             <div className="space-y-8">
-              {scanResult && <SuccessCard result={scanResult} />}
+              {/* **FIXED: Scan result with proper close handler** */}
+              {scanResult && (
+                <SuccessCard
+                  result={scanResult}
+                  onClose={handleCloseScanResult}
+                />
+              )}
 
               {/* Registration Form */}
               <div className="bg-white/70 backdrop-blur-lg rounded-3xl shadow-xl border border-white/20 p-8">

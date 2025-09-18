@@ -102,4 +102,56 @@ const logoutAdmin = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, {}, "Admin logged out successfully"));
 });
 
-module.exports = { registerAdmin, loginAdmin, logoutAdmin };
+const refreshAccessToken = asyncHandler(async (req, res) => {
+  const incomingRefreshToken =
+    req.cookies.refreshToken || req.body.refreshToken;
+
+  if (!incomingRefreshToken) {
+    throw new ApiError(401, "Unauthorized request: No refresh token");
+  }
+
+  try {
+    const decodedToken = jwt.verify(
+      incomingRefreshToken,
+      process.env.REFRESH_TOKEN_SECRET
+    );
+    const admin = await Admin.findById(decodedToken?._id);
+
+    if (!admin) {
+      throw new ApiError(401, "Invalid refresh token");
+    }
+
+    if (incomingRefreshToken !== admin?.refreshToken) {
+      throw new ApiError(401, "Refresh token is expired or used");
+    }
+
+    const accessToken = admin.generateAccessToken();
+    const newRefreshToken = admin.generateRefreshToken();
+
+    admin.refreshToken = newRefreshToken;
+    await admin.save();
+
+    const options = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    };
+
+    return res
+      .status(200)
+      .cookie("accessToken", accessToken, options)
+      .cookie("refreshToken", newRefreshToken, options)
+      .json(
+        new ApiResponse(
+          200,
+          { accessToken, refreshToken: newRefreshToken },
+          "Access token refreshed"
+        )
+      );
+  } catch (error) {
+    throw new ApiError(401, error?.message || "Invalid refresh token");
+  }
+});
+
+// Add to exports
+module.exports = { registerAdmin, loginAdmin, logoutAdmin, refreshAccessToken };

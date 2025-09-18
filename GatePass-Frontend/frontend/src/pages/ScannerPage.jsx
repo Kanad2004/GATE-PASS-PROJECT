@@ -42,6 +42,9 @@ const ScannerPage = () => {
   const [permissionState, setPermissionState] = useState("unknown");
   const [showPermissionDialog, setShowPermissionDialog] = useState(false);
 
+  // **NEW: Track scanner readiness**
+  const [scannerReady, setScannerReady] = useState(false);
+
   const scannerRef = useRef(null);
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
@@ -61,7 +64,6 @@ const ScannerPage = () => {
     try {
       console.log("Initializing cameras, attempt:", retryCount + 1);
 
-      // **Use navigator.mediaDevices.enumerateDevices() for better device detection**
       const allDevices = await navigator.mediaDevices.enumerateDevices();
       const videoDevices = allDevices.filter(
         (device) => device.kind === "videoinput"
@@ -70,7 +72,6 @@ const ScannerPage = () => {
       console.log("Found video devices:", videoDevices);
 
       if (videoDevices && videoDevices.length > 0) {
-        // **Convert to Html5Qrcode format with enhanced labeling**
         const cameras = videoDevices.map((device, index) => ({
           id: device.deviceId,
           label:
@@ -82,7 +83,6 @@ const ScannerPage = () => {
 
         setDevices(cameras);
 
-        // **Smart camera selection with preference order**
         let selectedCameraId = null;
 
         // 1. Prefer back/rear/environment camera
@@ -111,7 +111,6 @@ const ScannerPage = () => {
 
         return true;
       } else {
-        // **Retry with delay for devices to be ready**
         if (retryCount < 3) {
           console.log("No cameras found, retrying in 1 second...");
           await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -126,7 +125,6 @@ const ScannerPage = () => {
     } catch (error) {
       console.error("Failed to enumerate devices:", error);
 
-      // **Fallback to Html5Qrcode method**
       try {
         console.log("Falling back to Html5Qrcode.getCameras()");
         const cameras = await Html5Qrcode.getCameras();
@@ -207,7 +205,7 @@ const ScannerPage = () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: "environment", // Prefer back camera
+          facingMode: "environment",
           width: { ideal: 1280 },
           height: { ideal: 720 },
         },
@@ -218,7 +216,6 @@ const ScannerPage = () => {
       setPermissionState("granted");
       setSuccess("✅ Camera access granted! Initializing cameras...");
 
-      // **Wait for devices to be available, then initialize**
       setTimeout(async () => {
         const success = await initializeCameras();
         if (success) {
@@ -270,6 +267,7 @@ const ScannerPage = () => {
     };
   }, []);
 
+  // **ENHANCED: Scanner initialization with retry logic**
   useEffect(() => {
     const user = safeLocalStorage.get("user");
     if (!user || user.role !== "admin") {
@@ -285,10 +283,31 @@ const ScannerPage = () => {
 
     const initializeScanner = async () => {
       try {
+        setScannerReady(false);
+
+        // **FIX: Clear any existing scanner first**
+        if (scannerRef.current) {
+          try {
+            if (scannerRef.current.getState() === 2) {
+              await scannerRef.current.stop();
+            }
+            await scannerRef.current.clear();
+          } catch (e) {
+            console.warn("Failed to clear existing scanner:", e);
+          }
+          scannerRef.current = null;
+        }
+
+        // **FIX: Add a small delay to ensure DOM is ready**
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
         scannerRef.current = new Html5Qrcode("qr-reader", {
           formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
           verbose: false,
         });
+
+        console.log("✅ Scanner initialized successfully");
+        setScannerReady(true);
 
         const hasPermission = await checkCameraPermissions();
 
@@ -297,7 +316,14 @@ const ScannerPage = () => {
         }
       } catch (err) {
         console.error("Scanner initialization error:", err);
+        setScannerReady(false);
         setCameraError(`Failed to initialize scanner: ${err.message}`);
+
+        // **FIX: Retry initialization after delay**
+        setTimeout(() => {
+          console.log("Retrying scanner initialization...");
+          initializeScanner();
+        }, 2000);
       }
     };
 
@@ -336,7 +362,7 @@ const ScannerPage = () => {
       );
       const defaultId = backCamera?.id || usbCamera?.id || devices[0].id;
       setCameraId(defaultId);
-      setError(""); // Clear any previous error
+      setError("");
       console.log("Set default cameraId to:", defaultId);
     }
   }, [devices, cameraId]);
@@ -559,6 +585,7 @@ const ScannerPage = () => {
     return true;
   };
 
+  // **FIXED: handleImageUpload function with proper null checks**
   const handleImageUpload = async (file) => {
     if (!file) return;
 
@@ -576,6 +603,26 @@ const ScannerPage = () => {
       return;
     }
 
+    // **FIX: Check if scanner is initialized before using scanFile**
+    if (!scannerRef.current) {
+      setError(
+        "Scanner not initialized. Please wait for the scanner to load or refresh the page."
+      );
+      return;
+    }
+
+    // **FIX: Additional check for scanner state and method availability**
+    try {
+      if (typeof scannerRef.current.scanFile !== "function") {
+        setError("Scanner not ready. Please try again in a moment.");
+        return;
+      }
+    } catch (err) {
+      console.error("Scanner state check failed:", err);
+      setError("Scanner not available. Please refresh the page and try again.");
+      return;
+    }
+
     setImageFile(file);
     setError("");
     setSuccess("");
@@ -583,11 +630,25 @@ const ScannerPage = () => {
     setLoading(true);
 
     try {
+      console.log("Attempting to scan uploaded image...");
       const result = await scannerRef.current.scanFile(file, true);
+      console.log("Image scan result:", result);
       await handleScanSuccess(result);
     } catch (err) {
       console.error("Image scan error:", err);
-      const errorMessage = `Failed to scan QR code from image: ${err.message}`;
+      let errorMessage = "Failed to scan QR code from image.";
+
+      // **Enhanced error messages based on error type**
+      if (err.message?.includes("QR code not found")) {
+        errorMessage =
+          "No QR code found in the uploaded image. Please ensure the image contains a clear QR code.";
+      } else if (err.message?.includes("Unable to decode")) {
+        errorMessage =
+          "Unable to decode QR code. Please try with a clearer image.";
+      } else if (err.message) {
+        errorMessage = `Scan failed: ${err.message}`;
+      }
+
       setError(errorMessage);
       speak("Scan Failed");
 
@@ -955,35 +1016,51 @@ const ScannerPage = () => {
                   )}
                 </button>
 
-                {/* File Upload Area */}
+                {/* **ENHANCED: File Upload Area with Scanner Status** */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     <PhotoIcon className="w-4 h-4 inline mr-1" />
                     Or Upload QR Code Image
+                    {/* **ADD SCANNER STATUS** */}
+                    {!scannerReady && (
+                      <span className="ml-2 text-xs text-amber-600">
+                        (Scanner initializing...)
+                      </span>
+                    )}
                   </label>
                   <div
                     className={`border-2 border-dashed rounded-2xl p-8 text-center transition-all duration-300 ${
                       dragActive
                         ? "border-indigo-500 bg-indigo-50/70 scale-105"
-                        : "border-gray-300 hover:border-indigo-400 hover:bg-gray-50/70"
+                        : scannerReady
+                          ? "border-gray-300 hover:border-indigo-400 hover:bg-gray-50/70"
+                          : "border-gray-200 bg-gray-50/50 cursor-not-allowed"
                     }`}
-                    onDragOver={handleDragOver}
-                    onDragLeave={handleDragLeave}
-                    onDrop={handleDrop}
+                    onDragOver={scannerReady ? handleDragOver : undefined}
+                    onDragLeave={scannerReady ? handleDragLeave : undefined}
+                    onDrop={scannerReady ? handleDrop : undefined}
                   >
                     <input
                       id="image-upload"
                       type="file"
                       accept="image/*"
                       ref={fileInputRef}
-                      onChange={(e) => handleImageUpload(e.target.files[0])}
+                      onChange={(e) =>
+                        scannerReady && handleImageUpload(e.target.files[0])
+                      }
                       className="hidden"
                       aria-label="Upload QR code image"
+                      disabled={!scannerReady}
                     />
-                    <label htmlFor="image-upload" className="cursor-pointer">
+                    <label
+                      htmlFor="image-upload"
+                      className={`cursor-pointer ${!scannerReady ? "opacity-50" : ""}`}
+                    >
                       <ArrowUpTrayIcon className="w-12 h-12 text-gray-400 mx-auto mb-3" />
                       <p className="text-indigo-600 font-medium mb-1">
-                        Click to upload or drag and drop
+                        {scannerReady
+                          ? "Click to upload or drag and drop"
+                          : "Scanner initializing..."}
                       </p>
                       <p className="text-sm text-gray-500">
                         PNG, JPG, JPEG, GIF, WebP up to 10MB
