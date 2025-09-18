@@ -1,15 +1,33 @@
-import { useState, useEffect } from "react";
-import { useNavigate, useLocation } from "react-router-dom";
+import { useState, useEffect, useMemo, useCallback } from "react";
+import { useNavigate, useLocation, Link } from "react-router-dom";
+import {
+  sendOtp,
+  safeLocalStorage,
+  checkNetworkConnection,
+  checkRateLimit,
+} from "../utils/api";
 import DatePicker from "react-datepicker";
 import "react-datepicker/dist/react-datepicker.css";
-import { sendOtp } from "../utils/api";
-import { CheckCircleIcon, XCircleIcon } from "@heroicons/react/20/solid";
-import Confetti from "react-confetti";
+import {
+  CalendarIcon,
+  UserIcon,
+  EnvelopeIcon,
+  PhoneIcon,
+  ClipboardDocumentListIcon,
+  ClockIcon,
+  CheckCircleIcon,
+  ExclamationTriangleIcon,
+  QrCodeIcon,
+  DocumentTextIcon,
+  UserGroupIcon,
+  ShieldCheckIcon,
+  WifiIcon,
+  SparklesIcon,
+  DocumentArrowDownIcon, // Added for visitor reports
+} from "@heroicons/react/24/outline";
 
 const Home = () => {
   const [activeTab, setActiveTab] = useState("home");
-  const [user, setUser] = useState(null);
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [formData, setFormData] = useState({
     name: "",
     email: "",
@@ -18,896 +36,797 @@ const Home = () => {
   });
   const [visitDateTime, setVisitDateTime] = useState(null);
   const [errors, setErrors] = useState({});
-  const [logDate, setLogDate] = useState(new Date());
-  const [formProgress, setFormProgress] = useState(0);
-  const [showConfetti, setShowConfetti] = useState(false);
-  const [scanConfirmation, setScanConfirmation] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [scanResult, setScanResult] = useState(null);
+  const [showSuccessAnimation, setShowSuccessAnimation] = useState(false);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [submitAttempts, setSubmitAttempts] = useState(0);
+
   const navigate = useNavigate();
   const location = useLocation();
 
+  // Network status monitoring
   useEffect(() => {
-    console.log("Home - useEffect - Location:", location);
-    const loggedInUser = localStorage.getItem("user");
-    if (loggedInUser) {
-      setUser(JSON.parse(loggedInUser));
-    }
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
 
-    const pathname = location.pathname;
-    let initialTab = pathname === "/daily-entry" ? "daily-entry" : "home";
-    if (location.state && location.state.activeTab) {
-      initialTab = location.state.activeTab;
-    }
-    console.log("Home - useEffect - Setting activeTab:", initialTab);
-    setActiveTab(initialTab);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
 
-    let scanResult = null;
-    if (location.state && location.state.scanResult) {
-      console.log(
-        "Home - useEffect - Found scanResult in location.state:",
-        location.state.scanResult
-      );
-      scanResult = location.state.scanResult;
-    } else {
-      const storedScanResult = localStorage.getItem("scanResult");
-      if (storedScanResult) {
-        console.log(
-          "Home - useEffect - Found scanResult in localStorage:",
-          storedScanResult
-        );
-        scanResult = JSON.parse(storedScanResult);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  // Enhanced location state handling
+  useEffect(() => {
+    try {
+      if (location.state?.activeTab) {
+        setActiveTab(location.state.activeTab);
       }
+
+      if (location.state?.scanResult) {
+        setScanResult(location.state.scanResult);
+        setShowSuccessAnimation(true);
+        const timer = setTimeout(() => setShowSuccessAnimation(false), 3000);
+        return () => clearTimeout(timer);
+      }
+
+      // Safe localStorage access
+      const savedResult = safeLocalStorage.get("scanResult");
+      if (savedResult && !scanResult) {
+        setScanResult(savedResult);
+        safeLocalStorage.remove("scanResult");
+        setShowSuccessAnimation(true);
+        const timer = setTimeout(() => setShowSuccessAnimation(false), 3000);
+        return () => clearTimeout(timer);
+      }
+    } catch (error) {
+      console.error("Error processing location state:", error);
     }
+  }, [location.state, scanResult]);
 
-    if (scanResult) {
-      console.log("Home - useEffect - Setting scanConfirmation:", scanResult);
-      setScanConfirmation(scanResult);
-      setTimeout(() => {
-        console.log(
-          "Home - useEffect - Clearing scanConfirmation and localStorage"
-        );
-        setScanConfirmation(null);
-        localStorage.removeItem("scanResult");
-      }, 5000);
-    } else {
-      console.log("Home - useEffect - No scanResult found");
-    }
-
-    const totalFields = 5;
-    const filledFields =
-      Object.values(formData).filter(Boolean).length + (visitDateTime ? 1 : 0);
-    setFormProgress((filledFields / totalFields) * 100);
-  }, [location, location.key, formData, visitDateTime]);
-
-  const handleLogout = () => {
-    localStorage.removeItem("user");
-    localStorage.removeItem("scanResult");
-    setUser(null);
-    setActiveTab("home");
-    navigate("/");
-  };
-
-  const toggleMobileMenu = () => {
-    setIsMobileMenuOpen(!isMobileMenuOpen);
-  };
-
-  const validateForm = () => {
+  // Enhanced form validation with international support
+  const validate = useCallback(() => {
     const newErrors = {};
-    if (!formData.name) newErrors.name = "Name is required";
-    if (!formData.email) {
+
+    // Name validation
+    if (!formData.name.trim()) {
+      newErrors.name = "Name is required";
+    } else if (formData.name.trim().length < 2) {
+      newErrors.name = "Name must be at least 2 characters";
+    } else if (formData.name.trim().length > 50) {
+      newErrors.name = "Name must be less than 50 characters";
+    } else if (!/^[a-zA-Z\s.'-]+$/u.test(formData.name.trim())) {
+      newErrors.name = "Name contains invalid characters";
+    }
+
+    // Enhanced email validation
+    const emailRegex =
+      /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+    if (!formData.email.trim()) {
       newErrors.email = "Email is required";
-    } else if (!/.+\@.+\..+/.test(formData.email)) {
-      newErrors.email = "Invalid email address";
+    } else if (!emailRegex.test(formData.email.trim())) {
+      newErrors.email = "Please enter a valid email address";
+    } else if (formData.email.trim().length > 254) {
+      newErrors.email = "Email address is too long";
     }
-    if (!formData.mobileNumber) {
+
+    // International phone validation
+    const phoneRegex = /^[\+]?[1-9][\d]{0,15}$/; // International format
+    const indianPhoneRegex = /^[6-9]\d{9}$/; // Indian format
+    if (!formData.mobileNumber.trim()) {
       newErrors.mobileNumber = "Mobile number is required";
-    } else if (!/^\d{10}$/.test(formData.mobileNumber)) {
-      newErrors.mobileNumber = "Mobile number must be 10 digits";
-    }
-    if (!formData.purpose) newErrors.purpose = "Purpose of visit is required";
-    if (!visitDateTime) {
-      newErrors.visitDateTime = "Visit date and time are required";
     } else {
-      const hours = visitDateTime.getHours();
-      if (hours < 9 || hours >= 18) {
-        newErrors.visitDateTime = "Visits allowed between 9 AM and 6 PM";
+      const cleanPhone = formData.mobileNumber.replace(/[\s\-\(\)]/g, "");
+      if (!phoneRegex.test(cleanPhone) && !indianPhoneRegex.test(cleanPhone)) {
+        newErrors.mobileNumber = "Please enter a valid phone number";
       }
     }
-    return newErrors;
-  };
 
-  const handleRegister = async (e) => {
+    // Purpose validation
+    if (!formData.purpose.trim()) {
+      newErrors.purpose = "Purpose of visit is required";
+    } else if (formData.purpose.trim().length < 10) {
+      newErrors.purpose =
+        "Please provide more details about your visit (minimum 10 characters)";
+    } else if (formData.purpose.trim().length > 500) {
+      newErrors.purpose =
+        "Purpose description is too long (maximum 500 characters)";
+    }
+
+    // Enhanced date validation
+    if (!visitDateTime) {
+      newErrors.visitDateTime = "Visit date and time is required";
+    } else {
+      const now = new Date();
+      const minDate = new Date(now.getTime() + 30 * 60000); // 30 minutes from now
+      const maxDate = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 days from now
+
+      if (visitDateTime < minDate) {
+        newErrors.visitDateTime =
+          "Visit time must be at least 30 minutes from now";
+      } else if (visitDateTime > maxDate) {
+        newErrors.visitDateTime =
+          "Visit time cannot be more than 30 days in advance";
+      }
+
+      // Check business hours (9 AM to 6 PM)
+      const hour = visitDateTime.getHours();
+      if (hour < 9 || hour >= 18) {
+        newErrors.visitDateTime =
+          "Please select a time during business hours (9 AM - 6 PM)";
+      }
+
+      // Check weekends
+      const day = visitDateTime.getDay();
+      if (day === 0 || day === 6) {
+        newErrors.visitDateTime = "Office visits are not available on weekends";
+      }
+    }
+
+    return newErrors;
+  }, [formData, visitDateTime]);
+
+  // **FIX: Stable input change handlers using useCallback**
+  const handleNameChange = useCallback(
+    (e) => {
+      const value = e.target.value;
+      setFormData((prev) => ({ ...prev, name: value }));
+
+      // Clear field-specific error
+      if (errors.name) {
+        setErrors((prev) => ({ ...prev, name: "" }));
+      }
+    },
+    [errors.name]
+  );
+
+  const handleEmailChange = useCallback(
+    (e) => {
+      const value = e.target.value;
+      setFormData((prev) => ({ ...prev, email: value }));
+
+      // Clear field-specific error
+      if (errors.email) {
+        setErrors((prev) => ({ ...prev, email: "" }));
+      }
+    },
+    [errors.email]
+  );
+
+  const handleMobileChange = useCallback(
+    (e) => {
+      const value = e.target.value;
+      setFormData((prev) => ({ ...prev, mobileNumber: value }));
+
+      // Clear field-specific error
+      if (errors.mobileNumber) {
+        setErrors((prev) => ({ ...prev, mobileNumber: "" }));
+      }
+    },
+    [errors.mobileNumber]
+  );
+
+  const handlePurposeChange = useCallback(
+    (e) => {
+      const value = e.target.value;
+      setFormData((prev) => ({ ...prev, purpose: value }));
+
+      // Clear field-specific error
+      if (errors.purpose) {
+        setErrors((prev) => ({ ...prev, purpose: "" }));
+      }
+    },
+    [errors.purpose]
+  );
+
+  const handleDateTimeChange = useCallback(
+    (date) => {
+      setVisitDateTime(date);
+
+      // Clear field-specific error
+      if (errors.visitDateTime) {
+        setErrors((prev) => ({ ...prev, visitDateTime: "" }));
+      }
+    },
+    [errors.visitDateTime]
+  );
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    const validationErrors = validateForm();
-    if (Object.keys(validationErrors).length > 0) {
-      setErrors(validationErrors);
+
+    // Clear previous errors
+    setErrors({});
+
+    // **FIX: Clear any existing OTP timer when starting new registration**
+    safeLocalStorage.remove("otpStartTime");
+
+    // Network check
+    if (!checkNetworkConnection()) {
+      setErrors({
+        submit:
+          "No internet connection. Please check your network and try again.",
+      });
       return;
     }
 
+    // Rate limiting
     try {
-      await sendOtp({
-        email: formData.email,
-        name: formData.name,
-        mobileNumber: formData.mobileNumber,
-        purpose: formData.purpose,
-        visitDateAndTime: visitDateTime.toISOString(),
-      });
-      setShowConfetti(true);
-      setTimeout(() => setShowConfetti(false), 5000);
-      navigate("/verify-email", {
-        state: { formData, visitDateTime: visitDateTime.toISOString() },
-      });
-    } catch (error) {
-      setErrors({ api: error.message || "Failed to send OTP" });
+      checkRateLimit("registration", 3, 600000); // Max 3 registrations per 10 minutes
+    } catch (rateLimitError) {
+      setErrors({ submit: rateLimitError.message });
+      return;
     }
-  };
 
-  const handleDownloadLog = async () => {
-    try {
-      const response = await fetch(
-        `http://localhost:8000/api/v1/user/download-log?date=${
-          logDate.toISOString().split("T")[0]
-        }`,
-        {
-          headers: {
-            Authorization: `Bearer ${user.accessToken}`,
-          },
-        }
-      );
-      if (!response.ok) {
-        throw new Error("Failed to download log");
+    // Comprehensive validation
+    const validationErrors = validate();
+    if (Object.keys(validationErrors).length > 0) {
+      setErrors(validationErrors);
+
+      // Scroll to first error
+      const firstErrorField = document.querySelector(".border-rose-400");
+      if (firstErrorField) {
+        firstErrorField.scrollIntoView({ behavior: "smooth", block: "center" });
+        firstErrorField.focus();
       }
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.setAttribute(
-        "download",
-        `entry-log-${logDate.toISOString().split("T")[0]}.pdf`
-      );
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
+      return;
+    }
+
+    setLoading(true);
+    setSubmitAttempts((prev) => prev + 1);
+
+    try {
+      // Sanitize and prepare data
+      const sanitizedData = {
+        email: formData.email.trim().toLowerCase(),
+        name: formData.name.trim(),
+        mobileNumber: formData.mobileNumber.replace(/[\s\-\(\)]/g, ""),
+        purpose: formData.purpose.trim(),
+        visitDateAndTime: visitDateTime.toISOString(),
+      };
+
+      await sendOtp(sanitizedData);
+
+      // Navigate with clean state
+      navigate("/verify-email", {
+        state: {
+          formData: sanitizedData,
+          visitDateTime: sanitizedData.visitDateAndTime,
+        },
+      });
     } catch (error) {
-      setErrors({ api: "Failed to download log" });
+      console.error("Submit error:", error);
+
+      let errorMessage = "Failed to send OTP. Please try again.";
+
+      if (error.message?.includes("Network")) {
+        errorMessage =
+          "Network error. Please check your connection and try again.";
+      } else if (error.message?.includes("timeout")) {
+        errorMessage = "Request timeout. Please try again.";
+      } else if (error.message) {
+        errorMessage = error.message;
+      }
+
+      // Add attempt info for multiple failures
+      if (submitAttempts >= 2) {
+        errorMessage += ` (Attempt ${submitAttempts + 1})`;
+      }
+
+      setErrors({ submit: errorMessage });
+    } finally {
+      setLoading(false);
     }
   };
 
-  const renderContent = () => {
-    console.log(
-      "Home - renderContent - activeTab:",
-      activeTab,
-      "scanConfirmation:",
-      scanConfirmation
-    );
-    switch (activeTab) {
-      case "home":
-        return (
-          <div className="px-4 py-8 sm:px-6 lg:px-8">
-            <div className="text-center mb-12">
-              <h1 className="text-4xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-indigo-500 to-emerald-500">
-                Welcome to GatePass System
-              </h1>
-              <p className="mt-4 text-lg text-gray-600">
-                {user && user.role === "admin"
-                  ? "Admin Dashboard: Manage visitor registrations and entries."
-                  : "Register for a visit. No login required for visitors."}
-              </p>
-            </div>
-            {scanConfirmation ? (
-              <div className="max-w-lg mx-auto mb-6">
-                <p className="text-emerald-600 text-center bg-emerald-50 py-2 rounded-lg">
-                  {scanConfirmation.message || "Scan processed successfully"}
-                </p>
-                {scanConfirmation.entryExitMessage && (
-                  <p className="text-indigo-700 text-center mt-2 font-semibold">
-                    {scanConfirmation.entryExitMessage}
-                  </p>
-                )}
-                {scanConfirmation.user && (
-                  <p className="text-gray-700 text-center mt-2">
-                    User: {scanConfirmation.user.name} (
-                    {scanConfirmation.user.email})
-                  </p>
-                )}
-                {scanConfirmation.entryTime && (
-                  <p className="text-gray-700 text-center mt-2">
-                    Entry Time:{" "}
-                    {new Date(scanConfirmation.entryTime).toLocaleString()}
-                  </p>
-                )}
-                {scanConfirmation.exitTime && (
-                  <p className="text-gray-700 text-center mt-2">
-                    Exit Time:{" "}
-                    {new Date(scanConfirmation.exitTime).toLocaleString()}
-                  </p>
-                )}
-              </div>
-            ) : (
-              <div className="max-w-lg mx-auto mb-6">
-                <p className="text-gray-600 text-center">
-                  No recent scan data available.
-                </p>
-              </div>
-            )}
-            <div className="max-w-lg mx-auto bg-white/30 backdrop-blur-lg border border-gray-200/50 shadow-lg p-8 rounded-2xl">
-              <h2 className="text-2xl font-bold text-gray-800 mb-6 text-center">
-                Visitor Registration
-              </h2>
-              <div className="w-full bg-gray-200 rounded-full h-2.5 mb-6">
-                <div
-                  className="bg-indigo-600 h-2.5 rounded-full transition-all duration-300"
-                  style={{ width: `${formProgress}%` }}
-                ></div>
-              </div>
-              {errors.api && (
-                <p className="text-rose-500 mb-4 text-center bg-rose-50 py-2 rounded-lg">
-                  {errors.api}
-                </p>
-              )}
-              <form onSubmit={handleRegister} className="space-y-6">
-                <div className="relative">
-                  <input
-                    type="text"
-                    id="name"
-                    value={formData.name}
-                    onChange={(e) =>
-                      setFormData({ ...formData, name: e.target.value })
-                    }
-                    className={`peer block w-full px-4 py-3 border ${
-                      errors.name ? "border-rose-500" : "border-gray-200"
-                    } rounded-lg shadow-sm focus:outline-none focus:ring-4 focus:ring-indigo-300 focus:border-indigo-500 transition duration-200 bg-white/50`}
-                    placeholder=" "
-                  />
-                  <label
-                    htmlFor="name"
-                    className="absolute left-4 top-3 text-gray-500 transition-all duration-200 peer-placeholder-shown:top-3 peer-placeholder-shown:text-base peer-focus:-top-6 peer-focus:text-sm peer-focus:text-indigo-600 peer-filled:-top-6 peer-filled:text-sm"
-                  >
-                    Name
-                  </label>
-                  {formData.name && !errors.name && (
-                    <CheckCircleIcon className="absolute right-3 top-3 h-6 w-6 text-emerald-500" />
-                  )}
-                  {errors.name && (
-                    <XCircleIcon className="absolute right-3 top-3 h-6 w-6 text-rose-500" />
-                  )}
-                  {errors.name && (
-                    <p className="text-rose-500 text-xs mt-2">{errors.name}</p>
-                  )}
-                </div>
-                <div className="relative">
-                  <input
-                    type="email"
-                    id="email"
-                    value={formData.email}
-                    onChange={(e) =>
-                      setFormData({ ...formData, email: e.target.value })
-                    }
-                    className={`peer block w-full px-4 py-3 border ${
-                      errors.email ? "border-rose-500" : "border-gray-200"
-                    } rounded-lg shadow-sm focus:outline-none focus:ring-4 focus:ring-indigo-300 focus:border-indigo-500 transition duration-200 bg-white/50`}
-                    placeholder=" "
-                  />
-                  <label
-                    htmlFor="email"
-                    className="absolute left-4 top-3 text-gray-500 transition-all duration-200 peer-placeholder-shown:top-3 peer-placeholder-shown:text-base peer-focus:-top-6 peer-focus:text-sm peer-focus:text-indigo-600 peer-filled:-top-6 peer-filled:text-sm"
-                  >
-                    Email
-                  </label>
-                  {formData.email && !errors.email && (
-                    <CheckCircleIcon className="absolute right-3 top-3 h-6 w-6 text-emerald-500" />
-                  )}
-                  {errors.email && (
-                    <XCircleIcon className="absolute right-3 top-3 h-6 w-6 text-rose-500" />
-                  )}
-                  {errors.email && (
-                    <p className="text-rose-500 text-xs mt-2">{errors.email}</p>
-                  )}
-                </div>
-                <div className="relative">
-                  <input
-                    type="text"
-                    id="mobileNumber"
-                    value={formData.mobileNumber}
-                    onChange={(e) =>
-                      setFormData({ ...formData, mobileNumber: e.target.value })
-                    }
-                    className={`peer block w-full px-4 py-3 border ${
-                      errors.mobileNumber
-                        ? "border-rose-500"
-                        : "border-gray-200"
-                    } rounded-lg shadow-sm focus:outline-none focus:ring-4 focus:ring-indigo-300 focus:border-indigo-500 transition duration-200 bg-white/50`}
-                    placeholder=" "
-                  />
-                  <label
-                    htmlFor="mobileNumber"
-                    className="absolute left-4 top-3 text-gray-500 transition-all duration-200 peer-placeholder-shown:top-3 peer-placeholder-shown:text-base peer-focus:-top-6 peer-focus:text-sm peer-focus:text-indigo-600 peer-filled:-top-6 peer-filled:text-sm"
-                  >
-                    Mobile Number
-                  </label>
-                  {formData.mobileNumber && !errors.mobileNumber && (
-                    <CheckCircleIcon className="absolute right-3 top-3 h-6 w-6 text-emerald-500" />
-                  )}
-                  {errors.mobileNumber && (
-                    <XCircleIcon className="absolute right-3 top-3 h-6 w-6 text-rose-500" />
-                  )}
-                  {errors.mobileNumber && (
-                    <p className="text-rose-500 text-xs mt-2">
-                      {errors.mobileNumber}
-                    </p>
-                  )}
-                </div>
-                <div className="relative">
-                  <input
-                    type="text"
-                    id="purpose"
-                    value={formData.purpose}
-                    onChange={(e) =>
-                      setFormData({ ...formData, purpose: e.target.value })
-                    }
-                    className={`peer block w-full px-4 py-3 border ${
-                      errors.purpose ? "border-rose-500" : "border-gray-200"
-                    } rounded-lg shadow-sm focus:outline-none focus:ring-4 focus:ring-indigo-300 focus:border-indigo-500 transition duration-200 bg-white/50`}
-                    placeholder=" "
-                  />
-                  <label
-                    htmlFor="purpose"
-                    className="absolute left-4 top-3 text-gray-500 transition-all duration-200 peer-placeholder-shown:top-3 peer-placeholder-shown:text-base peer-focus:-top-6 peer-focus:text-sm peer-focus:text-indigo-600 peer-filled:-top-6 peer-filled:text-sm"
-                  >
-                    Purpose of Visit
-                  </label>
-                  {formData.purpose && !errors.purpose && (
-                    <CheckCircleIcon className="absolute right-3 top-3 h-6 w-6 text-emerald-500" />
-                  )}
-                  {errors.purpose && (
-                    <XCircleIcon className="absolute right-3 top-3 h-6 w-6 text-rose-500" />
-                  )}
-                  {errors.purpose && (
-                    <p className="text-rose-500 text-xs mt-2">
-                      {errors.purpose}
-                    </p>
-                  )}
-                </div>
-                <div className="relative">
-                  <DatePicker
-                    selected={visitDateTime}
-                    onChange={(date) => setVisitDateTime(date)}
-                    showTimeSelect
-                    timeFormat="HH:mm"
-                    timeIntervals={15}
-                    dateFormat="MMMM d, yyyy h:mm aa"
-                    className={`block w-full px-4 py-3 border ${
-                      errors.visitDateTime
-                        ? "border-rose-500"
-                        : "border-gray-200"
-                    } rounded-lg shadow-sm focus:outline-none focus:ring-4 focus:ring-indigo-300 focus:border-indigo-500 transition duration-200 bg-white/50`}
-                    placeholderText="Select visit date and time"
-                  />
-                  <label
-                    htmlFor="visitDateTime"
-                    className={`absolute left-4 text-gray-500 transition-all duration-200 pointer-events-none ${
-                      visitDateTime
-                        ? "-top-6 text-sm text-indigo-600"
-                        : "top-3 text-base"
-                    }`}
-                  >
-                    Visit Date and Time
-                  </label>
-                  {visitDateTime && !errors.visitDateTime && (
-                    <CheckCircleIcon className="absolute right-3 top-3 h-6 w-6 text-emerald-500" />
-                  )}
-                  {errors.visitDateTime && (
-                    <XCircleIcon className="absolute right-3 top-3 h-6 w-6 text-rose-500" />
-                  )}
-                  {errors.visitDateTime && (
-                    <p className="text-rose-500 text-xs mt-2">
-                      {errors.visitDateTime}
-                    </p>
-                  )}
-                </div>
-                <button
-                  type="submit"
-                  className="w-full bg-indigo-600 text-white py-3 px-4 rounded-lg shadow-lg hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-300 transition duration-200 transform hover:scale-105"
-                >
-                  Register
-                </button>
-              </form>
-              {showConfetti && <Confetti />}
-            </div>
-          </div>
-        );
-      case "requests":
-        return (
-          <div className="px-4 py-8 sm:px-6 lg:px-8">
-            <h1 className="text-4xl font-bold text-gray-800 text-center">
-              Visitor Requests
-            </h1>
-            <p className="text-gray-600 mt-2 text-center">
-              View and manage all pending and approved visitor requests.
-            </p>
-            <div className="mt-6 text-center">
-              <button
-                onClick={() => navigate("/requests")}
-                className="bg-indigo-600 text-white py-3 px-6 rounded-lg shadow-lg hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-300 transition duration-200 transform hover:scale-105"
-              >
-                Manage Requests
-              </button>
-            </div>
-          </div>
-        );
-      case "daily-entry":
-        return (
-          <div className="px-4 py-8 sm:px-6 lg:px-8">
-            <h1 className="text-4xl font-bold text-gray-800 text-center">
-              Daily Entry
-            </h1>
-            <p className="text-gray-600 mt-2 text-center">
-              Download daily entry logs for visitors as PDF.
-            </p>
-            <div className="mt-6 bg-white/30 backdrop-blur-lg border border-gray-200/50 shadow-lg p-8 rounded-2xl max-w-md mx-auto">
-              <label
-                htmlFor="logDate"
-                className="block text-sm font-medium text-gray-700"
-              >
-                Select Date
-              </label>
-              <DatePicker
-                selected={logDate}
-                onChange={(date) => setLogDate(date)}
-                dateFormat="yyyy-MM-dd"
-                className="mt-2 block w-full px-4 py-3 border border-gray-200 rounded-lg shadow-sm focus:outline-none focus:ring-4 focus:ring-indigo-300 focus:border-indigo-500 transition duration-200 bg-white/50"
-                placeholderText="Select date"
-              />
-              <button
-                onClick={handleDownloadLog}
-                className="mt-4 w-full bg-indigo-600 text-white py-3 px-4 rounded-lg shadow-lg hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-300 transition duration-200 transform hover:scale-105"
-              >
-                Download PDF Log
-              </button>
-              {errors.api && (
-                <p className="text-rose-500 mt-2 text-center bg-rose-50 py-2 rounded-lg">
-                  {errors.api}
-                </p>
-              )}
-            </div>
-          </div>
-        );
-      default:
-        return (
-          <div className="px-4 py-8 sm:px-6 lg:px-8">
-            <div className="text-center mb-12">
-              <h1 className="text-4xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-indigo-500 to-emerald-500">
-                Welcome to GatePass System
-              </h1>
-              <p className="mt-4 text-lg text-gray-600">
-                {user && user.role === "admin"
-                  ? "Admin Dashboard: Manage visitor registrations and entries."
-                  : "Register for a visit. No login required for visitors."}
-              </p>
-            </div>
-            {scanConfirmation ? (
-              <div className="max-w-lg mx-auto mb-6">
-                <p className="text-emerald-600 text-center bg-emerald-50 py-2 rounded-lg">
-                  {scanConfirmation.message || "Scan processed successfully"}
-                </p>
-                {scanConfirmation.entryExitMessage && (
-                  <p className="text-indigo-700 text-center mt-2 font-semibold">
-                    {scanConfirmation.entryExitMessage}
-                  </p>
-                )}
-                {scanConfirmation.user && (
-                  <p className="text-gray-700 text-center mt-2">
-                    User: {scanConfirmation.user.name} (
-                    {scanConfirmation.user.email})
-                  </p>
-                )}
-                {scanConfirmation.entryTime && (
-                  <p className="text-gray-700 text-center mt-2">
-                    Entry Time:{" "}
-                    {new Date(scanConfirmation.entryTime).toLocaleString()}
-                  </p>
-                )}
-                {scanConfirmation.exitTime && (
-                  <p className="text-gray-700 text-center mt-2">
-                    Exit Time:{" "}
-                    {new Date(scanConfirmation.exitTime).toLocaleString()}
-                  </p>
-                )}
-              </div>
-            ) : (
-              <div className="max-w-lg mx-auto mb-6">
-                <p className="text-gray-600 text-center">
-                  No recent scan data available.
-                </p>
-              </div>
-            )}
-            <div className="max-w-lg mx-auto bg-white/30 backdrop-blur-lg border border-gray-200/50 shadow-lg p-8 rounded-2xl">
-              <h2 className="text-2xl font-bold text-gray-800 mb-6 text-center">
-                Visitor Registration
-              </h2>
-              <div className="w-full bg-gray-200 rounded-full h-2.5 mb-6">
-                <div
-                  className="bg-indigo-600 h-2.5 rounded-full transition-all duration-300"
-                  style={{ width: `${formProgress}%` }}
-                ></div>
-              </div>
-              {errors.api && (
-                <p className="text-rose-500 mb-4 text-center bg-rose-50 py-2 rounded-lg">
-                  {errors.api}
-                </p>
-              )}
-              <form onSubmit={handleRegister} className="space-y-6">
-                <div className="relative">
-                  <input
-                    type="text"
-                    id="name"
-                    value={formData.name}
-                    onChange={(e) =>
-                      setFormData({ ...formData, name: e.target.value })
-                    }
-                    className={`peer block w-full px-4 py-3 border ${
-                      errors.name ? "border-rose-500" : "border-gray-200"
-                    } rounded-lg shadow-sm focus:outline-none focus:ring-4 focus:ring-indigo-300 focus:border-indigo-500 transition duration-200 bg-white/50`}
-                    placeholder=" "
-                  />
-                  <label
-                    htmlFor="name"
-                    className="absolute left-4 top-3 text-gray-500 transition-all duration-200 peer-placeholder-shown:top-3 peer-placeholder-shown:text-base peer-focus:-top-6 peer-focus:text-sm peer-focus:text-indigo-600 peer-filled:-top-6 peer-filled:text-sm"
-                  >
-                    Name
-                  </label>
-                  {formData.name && !errors.name && (
-                    <CheckCircleIcon className="absolute right-3 top-3 h-6 w-6 text-emerald-500" />
-                  )}
-                  {errors.name && (
-                    <XCircleIcon className="absolute right-3 top-3 h-6 w-6 text-rose-500" />
-                  )}
-                  {errors.name && (
-                    <p className="text-rose-500 text-xs mt-2">{errors.name}</p>
-                  )}
-                </div>
-                <div className="relative">
-                  <input
-                    type="email"
-                    id="email"
-                    value={formData.email}
-                    onChange={(e) =>
-                      setFormData({ ...formData, email: e.target.value })
-                    }
-                    className={`peer block w-full px-4 py-3 border ${
-                      errors.email ? "border-rose-500" : "border-gray-200"
-                    } rounded-lg shadow-sm focus:outline-none focus:ring-4 focus:ring-indigo-300 focus:border-indigo-500 transition duration-200 bg-white/50`}
-                    placeholder=" "
-                  />
-                  <label
-                    htmlFor="email"
-                    className="absolute left-4 top-3 text-gray-500 transition-all duration-200 peer-placeholder-shown:top-3 peer-placeholder-shown:text-base peer-focus:-top-6 peer-focus:text-sm peer-focus:text-indigo-600 peer-filled:-top-6 peer-filled:text-sm"
-                  >
-                    Email
-                  </label>
-                  {formData.email && !errors.email && (
-                    <CheckCircleIcon className="absolute right-3 top-3 h-6 w-6 text-emerald-500" />
-                  )}
-                  {errors.email && (
-                    <XCircleIcon className="absolute right-3 top-3 h-6 w-6 text-rose-500" />
-                  )}
-                  {errors.email && (
-                    <p className="text-rose-500 text-xs mt-2">{errors.email}</p>
-                  )}
-                </div>
-                <div className="relative">
-                  <input
-                    type="text"
-                    id="mobileNumber"
-                    value={formData.mobileNumber}
-                    onChange={(e) =>
-                      setFormData({ ...formData, mobileNumber: e.target.value })
-                    }
-                    className={`peer block w-full px-4 py-3 border ${
-                      errors.mobileNumber
-                        ? "border-rose-500"
-                        : "border-gray-200"
-                    } rounded-lg shadow-sm focus:outline-none focus:ring-4 focus:ring-indigo-300 focus:border-indigo-500 transition duration-200 bg-white/50`}
-                    placeholder=" "
-                  />
-                  <label
-                    htmlFor="mobileNumber"
-                    className="absolute left-4 top-3 text-gray-500 transition-all duration-200 peer-placeholder-shown:top-3 peer-placeholder-shown:text-base peer-focus:-top-6 peer-focus:text-sm peer-focus:text-indigo-600 peer-filled:-top-6 peer-filled:text-sm"
-                  >
-                    Mobile Number
-                  </label>
-                  {formData.mobileNumber && !errors.mobileNumber && (
-                    <CheckCircleIcon className="absolute right-3 top-3 h-6 w-6 text-emerald-500" />
-                  )}
-                  {errors.mobileNumber && (
-                    <XCircleIcon className="absolute right-3 top-3 h-6 w-6 text-rose-500" />
-                  )}
-                  {errors.mobileNumber && (
-                    <p className="text-rose-500 text-xs mt-2">
-                      {errors.mobileNumber}
-                    </p>
-                  )}
-                </div>
-                <div className="relative">
-                  <input
-                    type="text"
-                    id="purpose"
-                    value={formData.purpose}
-                    onChange={(e) =>
-                      setFormData({ ...formData, purpose: e.target.value })
-                    }
-                    className={`peer block w-full px-4 py-3 border ${
-                      errors.purpose ? "border-rose-500" : "border-gray-200"
-                    } rounded-lg shadow-sm focus:outline-none focus:ring-4 focus:ring-indigo-300 focus:border-indigo-500 transition duration-200 bg-white/50`}
-                    placeholder=" "
-                  />
-                  <label
-                    htmlFor="purpose"
-                    className="absolute left-4 top-3 text-gray-500 transition-all duration-200 peer-placeholder-shown:top-3 peer-placeholder-shown:text-base peer-focus:-top-6 peer-focus:text-sm peer-focus:text-indigo-600 peer-filled:-top-6 peer-filled:text-sm"
-                  >
-                    Purpose of Visit
-                  </label>
-                  {formData.purpose && !errors.purpose && (
-                    <CheckCircleIcon className="absolute right-3 top-3 h-6 w-6 text-emerald-500" />
-                  )}
-                  {errors.purpose && (
-                    <XCircleIcon className="absolute right-3 top-3 h-6 w-6 text-rose-500" />
-                  )}
-                  {errors.purpose && (
-                    <p className="text-rose-500 text-xs mt-2">
-                      {errors.purpose}
-                    </p>
-                  )}
-                </div>
-                <div className="relative">
-                  <DatePicker
-                    selected={visitDateTime}
-                    onChange={(date) => setVisitDateTime(date)}
-                    showTimeSelect
-                    timeFormat="HH:mm"
-                    timeIntervals={15}
-                    dateFormat="MMMM d, yyyy h:mm aa"
-                    className={`peer block w-full px-4 py-3 border ${
-                      errors.visitDateTime
-                        ? "border-rose-500"
-                        : "border-gray-200"
-                    } rounded-lg shadow-sm focus:outline-none focus:ring-4 focus:ring-indigo-300 focus:border-indigo-500 transition duration-200 bg-white/50`}
-                    placeholderText=" "
-                  />
-                  <label
-                    htmlFor="visitDateTime"
-                    className="absolute left-4 top-3 text-gray-500 transition-all duration-200 peer-placeholder-shown:top-3 peer-placeholder-shown:text-base peer-focus:-top-6 peer-focus:text-sm peer-focus:text-indigo-600 peer-filled:-top-6 peer-filled:text-sm"
-                  >
-                    Visit Date and Time
-                  </label>
-                  {visitDateTime && !errors.visitDateTime && (
-                    <CheckCircleIcon className="absolute right-3 top-3 h-6 w-6 text-emerald-500" />
-                  )}
-                  {errors.visitDateTime && (
-                    <XCircleIcon className="absolute right-3 top-3 h-6 w-6 text-rose-500" />
-                  )}
-                  {errors.visitDateTime && (
-                    <p className="text-rose-500 text-xs mt-2">
-                      {errors.visitDateTime}
-                    </p>
-                  )}
-                </div>
-                <button
-                  type="submit"
-                  className="w-full bg-indigo-600 text-white py-3 px-4 rounded-lg shadow-lg hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-300 transition duration-200 transform hover:scale-105"
-                >
-                  Register
-                </button>
-              </form>
-              {showConfetti && <Confetti />}
-            </div>
-          </div>
-        );
-    }
-  };
+  const isLoggedIn = useCallback(() => {
+    const user = safeLocalStorage.get("user");
+    return user && user.role === "admin";
+  }, []);
 
-  return (
-    <div className="min-h-screen flex flex-col bg-gradient-to-br from-indigo-50 via-white to-emerald-50">
-      <nav className="bg-indigo-700 shadow-lg sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between h-16">
-            <div className="flex items-center">
-              <span className="text-white text-xl font-bold">GatePass</span>
+  const handleLogout = useCallback(() => {
+    safeLocalStorage.remove("user");
+    setActiveTab("home");
+    navigate("/");
+  }, [navigate]);
+
+  const TabButton = ({
+    id,
+    label,
+    icon: Icon,
+    isActive,
+    onClick,
+    disabled = false,
+  }) => (
+    <button
+      onClick={() => !disabled && onClick(id)}
+      disabled={disabled}
+      className={`group relative flex items-center space-x-2 px-6 py-3 rounded-xl font-medium transition-all duration-300 transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none ${
+        isActive
+          ? "bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-lg shadow-indigo-500/25"
+          : "bg-white/70 backdrop-blur-sm text-gray-700 hover:bg-white/90 border border-white/20"
+      }`}
+      aria-label={label}
+    >
+      <Icon
+        className={`w-5 h-5 transition-transform duration-300 ${
+          isActive ? "rotate-12" : "group-hover:rotate-12"
+        }`}
+      />
+      <span>{label}</span>
+      {isActive && (
+        <div className="absolute inset-0 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-600 opacity-20 animate-pulse" />
+      )}
+    </button>
+  );
+
+  // **FIX: Stable InputField component to prevent re-renders**
+  const InputField = useCallback(
+    ({
+      id,
+      label,
+      type = "text",
+      value,
+      onChange,
+      error,
+      icon: Icon,
+      placeholder,
+      maxLength,
+      ...props
+    }) => (
+      <div className="group">
+        <label
+          htmlFor={id}
+          className="block text-sm font-medium text-gray-700 mb-2 group-focus-within:text-indigo-600 transition-colors duration-200"
+        >
+          <Icon className="w-4 h-4 inline mr-2" />
+          {label}
+        </label>
+        <div className="relative">
+          <input
+            id={id}
+            type={type}
+            value={value}
+            onChange={onChange}
+            placeholder={placeholder}
+            maxLength={maxLength}
+            className={`w-full px-4 py-3 bg-white/70 backdrop-blur-sm border-2 rounded-xl shadow-sm placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all duration-300 ${
+              error
+                ? "border-rose-400 bg-rose-50/70"
+                : "border-gray-200 hover:border-gray-300"
+            }`}
+            aria-invalid={error ? "true" : "false"}
+            aria-describedby={error ? `${id}-error` : undefined}
+            {...props}
+          />
+          {error && (
+            <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
+              <ExclamationTriangleIcon className="w-5 h-5 text-rose-400" />
             </div>
-            <div className="hidden sm:ml-6 sm:flex sm:items-center">
-              <div className="flex space-x-4">
-                <NavItem
-                  title="Home"
-                  isActive={activeTab === "home"}
-                  onClick={() => {
-                    setActiveTab("home");
-                    navigate("/", { state: { activeTab: "home" } });
-                  }}
-                />
-                {user && user.role === "admin" && (
-                  <>
-                    <NavItem
-                      title="Requests"
-                      isActive={activeTab === "requests"}
-                      onClick={() => {
-                        setActiveTab("requests");
-                        navigate("/requests", {
-                          state: { activeTab: "requests" },
-                        });
-                      }}
-                    />
-                    <NavItem
-                      title="Daily Entry"
-                      isActive={activeTab === "daily-entry"}
-                      onClick={() => {
-                        setActiveTab("daily-entry");
-                        navigate("/daily-entry", {
-                          state: { activeTab: "daily-entry" },
-                        });
-                      }}
-                    />
-                    <NavItem
-                      title="Scan QR"
-                      isActive={activeTab === "scan"}
-                      onClick={() => {
-                        setActiveTab("scan");
-                        navigate("/scan", { state: { activeTab: "scan" } });
-                      }}
-                    />
-                  </>
-                )}
-                {user ? (
-                  <button
-                    onClick={handleLogout}
-                    className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-800 transition duration-200 transform hover:scale-110"
-                  >
-                    Logout (Admin: {user.name})
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => navigate("/login")}
-                    className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-800 transition duration-200 transform hover:scale-110"
-                  >
-                    Admin Login
-                  </button>
-                )}
-              </div>
-            </div>
-            <div className="flex items-center sm:hidden">
-              <button
-                type="button"
-                className="inline-flex items-center justify-center p-2 rounded-md text-white hover:bg-indigo-600 focus:outline-none transition duration-200"
-                onClick={toggleMobileMenu}
-              >
-                <svg
-                  className="h-6 w-6"
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                    d="M4 6h16M4 12h16M4 18h16"
-                  />
-                </svg>
-              </button>
-            </div>
+          )}
+        </div>
+        {error && (
+          <p
+            id={`${id}-error`}
+            className="mt-2 text-sm text-rose-600 flex items-center animate-shake"
+          >
+            <ExclamationTriangleIcon className="w-4 h-4 mr-1" />
+            {error}
+          </p>
+        )}
+        {maxLength && (
+          <p className="mt-1 text-xs text-gray-500 text-right">
+            {value.length}/{maxLength}
+          </p>
+        )}
+      </div>
+    ),
+    []
+  ); // Empty dependency array makes it stable
+
+  const SuccessCard = ({ result }) => (
+    <div
+      className={`bg-gradient-to-br from-emerald-50 to-teal-50 border-2 border-emerald-200 rounded-2xl p-6 shadow-lg transform transition-all duration-500 ${
+        showSuccessAnimation ? "animate-slideIn scale-105" : ""
+      }`}
+    >
+      <div className="flex items-center justify-center mb-4">
+        <div className="relative">
+          {result.success ? (
+            <CheckCircleIcon className="w-16 h-16 text-emerald-500 animate-bounce" />
+          ) : (
+            <ExclamationTriangleIcon className="w-16 h-16 text-rose-500 animate-shake" />
+          )}
+          <div className="absolute inset-0 flex items-center justify-center">
+            <SparklesIcon className="w-8 h-8 text-emerald-300 animate-spin" />
           </div>
         </div>
-        {isMobileMenuOpen && (
-          <div className="sm:hidden animate-slideIn">
-            <div className="px-2 pt-2 pb-3 space-y-1">
-              <MobileNavItem
-                title="Home"
-                isActive={activeTab === "home"}
-                onClick={() => {
-                  setActiveTab("home");
-                  navigate("/", { state: { activeTab: "home" } });
-                  setIsMobileMenuOpen(false);
-                }}
-              />
-              {user && user.role === "admin" && (
-                <>
-                  <MobileNavItem
-                    title="Requests"
-                    isActive={activeTab === "requests"}
-                    onClick={() => {
-                      setActiveTab("requests");
-                      navigate("/requests", {
-                        state: { activeTab: "requests" },
-                      });
-                      setIsMobileMenuOpen(false);
-                    }}
-                  />
-                  <MobileNavItem
-                    title="Daily Entry"
-                    isActive={activeTab === "daily-entry"}
-                    onClick={() => {
-                      setActiveTab("daily-entry");
-                      navigate("/daily-entry", {
-                        state: { activeTab: "daily-entry" },
-                      });
-                      setIsMobileMenuOpen(false);
-                    }}
-                  />
-                  <MobileNavItem
-                    title="Scan QR"
-                    isActive={activeTab === "scan"}
-                    onClick={() => {
-                      setActiveTab("scan");
-                      navigate("/scan", { state: { activeTab: "scan" } });
-                      setIsMobileMenuOpen(false);
-                    }}
-                  />
-                </>
-              )}
-              {user ? (
-                <button
-                  onClick={() => {
-                    handleLogout();
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className="block w-full px-3 py-2 rounded-lg text-base font-medium text-left text-white hover:bg-indigo-600 transition duration-200"
-                >
-                  Logout (Admin: {user.name})
-                </button>
-              ) : (
-                <button
-                  onClick={() => {
-                    navigate("/login");
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className="block w-full px-3 py-2 rounded-lg text-base font-medium text-left text-white hover:bg-indigo-600 transition duration-200"
-                >
-                  Admin Login
-                </button>
-              )}
+      </div>
+
+      <div className="text-center space-y-3">
+        <h3 className="text-2xl font-bold text-emerald-800">
+          {result.success ? "Scan Successful!" : "Scan Failed"}
+        </h3>
+        <p
+          className={`text-lg ${
+            result.success ? "text-emerald-700" : "text-rose-700"
+          }`}
+        >
+          {result.message}
+        </p>
+
+        {result.entryExitMessage && (
+          <div className="bg-white/70 backdrop-blur-sm rounded-lg p-3 border border-emerald-200">
+            <p className="font-semibold text-indigo-700 flex items-center justify-center">
+              <ClockIcon className="w-5 h-5 mr-2" />
+              {result.entryExitMessage}
+            </p>
+          </div>
+        )}
+
+        {result.user && (
+          <div className="bg-white/70 backdrop-blur-sm rounded-lg p-4 border border-emerald-200">
+            <h4 className="font-semibold text-gray-800 mb-2 flex items-center justify-center">
+              <UserIcon className="w-5 h-5 mr-2" />
+              Visitor Details
+            </h4>
+            <div className="space-y-1 text-sm text-gray-600">
+              <p>
+                <span className="font-medium">Name:</span> {result.user.name}
+              </p>
+              <p>
+                <span className="font-medium">Email:</span> {result.user.email}
+              </p>
             </div>
           </div>
         )}
-      </nav>
-      <main className="flex-grow">{renderContent()}</main>
-      <footer className="bg-white shadow-inner">
-        <div className="max-w-7xl mx-auto py-4 px-4 sm:px-6 lg:px-8">
-          <p className="text-center text-sm text-gray-500">
-            © {new Date().getFullYear()} GatePass System. All rights reserved.
-          </p>
-        </div>
-      </footer>
+
+        <button
+          onClick={() => setScanResult(null)}
+          className="mt-4 px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors duration-200"
+        >
+          Close
+        </button>
+      </div>
     </div>
   );
-};
 
-const NavItem = ({ title, isActive, onClick }) => {
-  return (
-    <button
-      onClick={onClick}
-      className={`px-4 py-2 rounded-lg text-sm font-medium transition duration-200 transform ${
-        isActive
-          ? "bg-indigo-800 text-white scale-110"
-          : "text-indigo-100 hover:bg-indigo-600 hover:scale-110"
-      }`}
+  const FeatureCard = ({ icon: Icon, title, description, gradient }) => (
+    <div
+      className={`group relative bg-gradient-to-br ${gradient} p-6 rounded-2xl shadow-lg transform transition-all duration-300 hover:scale-105 hover:shadow-xl cursor-pointer`}
     >
-      {title}
-    </button>
+      <div className="absolute inset-0 bg-gradient-to-br from-white/20 to-transparent rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+      <Icon className="w-12 h-12 text-white mb-4 transform group-hover:rotate-12 transition-transform duration-300" />
+      <h3 className="text-xl font-bold text-white mb-2">{title}</h3>
+      <p className="text-white/90 text-sm leading-relaxed">{description}</p>
+    </div>
   );
-};
 
-const MobileNavItem = ({ title, isActive, onClick }) => {
   return (
-    <button
-      onClick={onClick}
-      className={`block px-3 py-2 rounded-lg text-base font-medium w-full text-left transition duration-200 ${
-        isActive
-          ? "bg-indigo-800 text-white"
-          : "text-indigo-100 hover:bg-indigo-600"
-      }`}
-    >
-      {title}
-    </button>
+    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 relative overflow-hidden">
+      {/* Animated Background Elements */}
+      <div className="absolute top-0 left-0 w-72 h-72 bg-purple-300 rounded-full mix-blend-multiply filter blur-xl opacity-70 animate-blob" />
+      <div className="absolute top-0 right-0 w-72 h-72 bg-yellow-300 rounded-full mix-blend-multiply filter blur-xl opacity-70 animate-blob animation-delay-2000" />
+      <div className="absolute -bottom-8 left-20 w-72 h-72 bg-pink-300 rounded-full mix-blend-multiply filter blur-xl opacity-70 animate-blob animation-delay-4000" />
+
+      <div className="relative z-10 container mx-auto px-4 py-8">
+        {/* Header */}
+        <header className="text-center mb-12">
+          <div className="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl mb-6 shadow-lg transform rotate-3 hover:rotate-6 transition-transform duration-300">
+            <QrCodeIcon className="w-10 h-10 text-white" />
+          </div>
+          <h1 className="text-5xl font-bold bg-gradient-to-r from-indigo-600 via-purple-600 to-teal-600 bg-clip-text text-transparent mb-4">
+            Visitor Management System
+          </h1>
+          <p className="text-xl text-gray-600 max-w-2xl mx-auto">
+            Streamlined visitor registration and QR-based access control for
+            modern offices
+          </p>
+        </header>
+
+        {/* Offline Indicator */}
+        {!isOnline && (
+          <div className="max-w-4xl mx-auto mb-6 p-4 bg-rose-50/80 backdrop-blur-sm border border-rose-200 rounded-xl flex items-center justify-center">
+            <WifiIcon className="w-5 h-5 text-rose-500 mr-2 flex-shrink-0" />
+            <span className="text-rose-700">
+              You're offline. Some features may not work properly.
+            </span>
+          </div>
+        )}
+
+        {/* Navigation Tabs */}
+        <nav className="flex flex-wrap justify-center gap-4 mb-12">
+          <TabButton
+            id="home"
+            label="Register Visit"
+            icon={UserIcon}
+            isActive={activeTab === "home"}
+            onClick={setActiveTab}
+            disabled={!isOnline}
+          />
+          {isLoggedIn() && (
+            <>
+              <TabButton
+                id="requests"
+                label="Manage Requests"
+                icon={DocumentTextIcon}
+                isActive={activeTab === "requests"}
+                onClick={setActiveTab}
+              />
+              <TabButton
+                id="scanner"
+                label="QR Scanner"
+                icon={QrCodeIcon}
+                isActive={activeTab === "scanner"}
+                onClick={setActiveTab}
+              />
+              <TabButton
+                id="reports"
+                label="Visitor Reports"
+                icon={DocumentArrowDownIcon}
+                isActive={activeTab === "reports"}
+                onClick={setActiveTab}
+              />
+            </>
+          )}
+          <TabButton
+            id={isLoggedIn() ? "logout" : "login"}
+            label={isLoggedIn() ? "Logout" : "Admin Login"}
+            icon={ShieldCheckIcon}
+            isActive={false}
+            onClick={isLoggedIn() ? handleLogout : () => navigate("/login")}
+          />
+        </nav>
+
+        {/* Tab Content */}
+        <main className="max-w-4xl mx-auto">
+          {activeTab === "home" && (
+            <div className="space-y-8">
+              {scanResult && <SuccessCard result={scanResult} />}
+
+              {/* Registration Form */}
+              <div className="bg-white/70 backdrop-blur-lg rounded-3xl shadow-xl border border-white/20 p-8">
+                <div className="text-center mb-8">
+                  <UserGroupIcon className="w-16 h-16 text-indigo-600 mx-auto mb-4" />
+                  <h2 className="text-3xl font-bold text-gray-800 mb-2">
+                    Register Your Visit
+                  </h2>
+                  <p className="text-gray-600">
+                    Fill in your details to request access
+                  </p>
+                </div>
+
+                <form onSubmit={handleSubmit} className="space-y-6" noValidate>
+                  {errors.submit && (
+                    <div className="bg-rose-50 border-l-4 border-rose-400 p-4 rounded-lg animate-shake">
+                      <div className="flex items-center">
+                        <ExclamationTriangleIcon className="w-5 h-5 text-rose-400 mr-2" />
+                        <p className="text-rose-700">{errors.submit}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="grid md:grid-cols-2 gap-6">
+                    <InputField
+                      id="name"
+                      label="Full Name"
+                      value={formData.name}
+                      onChange={handleNameChange}
+                      error={errors.name}
+                      icon={UserIcon}
+                      placeholder="Enter your full name"
+                      maxLength={50}
+                      autoComplete="name"
+                    />
+                    <InputField
+                      id="email"
+                      label="Email Address"
+                      type="email"
+                      value={formData.email}
+                      onChange={handleEmailChange}
+                      error={errors.email}
+                      icon={EnvelopeIcon}
+                      placeholder="Enter your email"
+                      maxLength={254}
+                      autoComplete="email"
+                    />
+                  </div>
+
+                  <div className="grid md:grid-cols-2 gap-6">
+                    <InputField
+                      id="mobileNumber"
+                      label="Mobile Number"
+                      type="tel"
+                      value={formData.mobileNumber}
+                      onChange={handleMobileChange}
+                      error={errors.mobileNumber}
+                      icon={PhoneIcon}
+                      placeholder="Enter your phone number"
+                      autoComplete="tel"
+                    />
+
+                    <div className="group">
+                      <label className="block text-sm font-medium text-gray-700 mb-2 group-focus-within:text-indigo-600 transition-colors duration-200">
+                        <CalendarIcon className="w-4 h-4 inline mr-2" />
+                        Visit Date & Time
+                      </label>
+                      <DatePicker
+                        selected={visitDateTime}
+                        onChange={handleDateTimeChange}
+                        showTimeSelect
+                        timeFormat="HH:mm"
+                        timeIntervals={15}
+                        dateFormat="MMMM d, yyyy h:mm aa"
+                        minDate={new Date(Date.now() + 30 * 60000)}
+                        maxDate={
+                          new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+                        }
+                        filterTime={(time) => {
+                          const hour = time.getHours();
+                          return hour >= 9 && hour < 18;
+                        }}
+                        filterDate={(date) => {
+                          const day = date.getDay();
+                          return day !== 0 && day !== 6; // Exclude weekends
+                        }}
+                        className={`w-full px-4 py-3 bg-white/70 backdrop-blur-sm border-2 rounded-xl shadow-sm placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all duration-300 ${
+                          errors.visitDateTime
+                            ? "border-rose-400 bg-rose-50/70"
+                            : "border-gray-200 hover:border-gray-300"
+                        }`}
+                        placeholderText="Select visit date and time"
+                        autoComplete="off"
+                      />
+                      {errors.visitDateTime && (
+                        <p className="mt-2 text-sm text-rose-600 flex items-center animate-shake">
+                          <ExclamationTriangleIcon className="w-4 h-4 mr-1" />
+                          {errors.visitDateTime}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="group">
+                    <label
+                      htmlFor="purpose"
+                      className="block text-sm font-medium text-gray-700 mb-2 group-focus-within:text-indigo-600 transition-colors duration-200"
+                    >
+                      <ClipboardDocumentListIcon className="w-4 h-4 inline mr-2" />
+                      Purpose of Visit
+                    </label>
+                    <textarea
+                      id="purpose"
+                      rows={4}
+                      value={formData.purpose}
+                      onChange={handlePurposeChange}
+                      placeholder="Please describe the purpose of your visit in detail..."
+                      maxLength={500}
+                      className={`w-full px-4 py-3 bg-white/70 backdrop-blur-sm border-2 rounded-xl shadow-sm placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all duration-300 resize-none ${
+                        errors.purpose
+                          ? "border-rose-400 bg-rose-50/70"
+                          : "border-gray-200 hover:border-gray-300"
+                      }`}
+                      aria-invalid={errors.purpose ? "true" : "false"}
+                      aria-describedby={
+                        errors.purpose ? "purpose-error" : undefined
+                      }
+                    />
+                    {errors.purpose && (
+                      <p
+                        id="purpose-error"
+                        className="mt-2 text-sm text-rose-600 flex items-center animate-shake"
+                      >
+                        <ExclamationTriangleIcon className="w-4 h-4 mr-1" />
+                        {errors.purpose}
+                      </p>
+                    )}
+                    <p className="mt-1 text-xs text-gray-500 text-right">
+                      {formData.purpose.length}/500
+                    </p>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={loading || !isOnline}
+                    className="w-full bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-semibold py-4 px-8 rounded-xl shadow-lg hover:shadow-xl transform hover:scale-[1.02] focus:outline-none focus:ring-4 focus:ring-indigo-500/20 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+                  >
+                    {loading ? (
+                      <div className="flex items-center justify-center">
+                        <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2" />
+                        Sending OTP...
+                      </div>
+                    ) : (
+                      "Send OTP & Register"
+                    )}
+                  </button>
+                </form>
+              </div>
+
+              {/* Features Section */}
+              <div className="grid md:grid-cols-3 gap-6 mt-12">
+                <FeatureCard
+                  icon={QrCodeIcon}
+                  title="QR Code Access"
+                  description="Secure QR-based entry system with real-time validation"
+                  gradient="from-indigo-500 to-blue-600"
+                />
+                <FeatureCard
+                  icon={ShieldCheckIcon}
+                  title="Admin Control"
+                  description="Complete admin dashboard for managing visitor requests"
+                  gradient="from-purple-500 to-pink-600"
+                />
+                <FeatureCard
+                  icon={ClockIcon}
+                  title="Real-time Tracking"
+                  description="Track entry and exit times with detailed logs"
+                  gradient="from-teal-500 to-green-600"
+                />
+              </div>
+            </div>
+          )}
+
+          {activeTab === "requests" && isLoggedIn() && (
+            <div className="bg-white/70 backdrop-blur-lg rounded-3xl shadow-xl border border-white/20 p-8 text-center">
+              <DocumentTextIcon className="w-16 h-16 text-indigo-600 mx-auto mb-4" />
+              <h2 className="text-3xl font-bold text-gray-800 mb-4">
+                Manage Visitor Requests
+              </h2>
+              <p className="text-gray-600 mb-6">
+                Review and approve pending visitor applications
+              </p>
+              <Link
+                to="/requests"
+                className="inline-flex items-center px-8 py-4 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-semibold rounded-xl shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-300"
+              >
+                View Requests
+                <DocumentTextIcon className="w-5 h-5 ml-2" />
+              </Link>
+            </div>
+          )}
+
+          {activeTab === "scanner" && isLoggedIn() && (
+            <div className="bg-white/70 backdrop-blur-lg rounded-3xl shadow-xl border border-white/20 p-8 text-center">
+              <QrCodeIcon className="w-16 h-16 text-indigo-600 mx-auto mb-4" />
+              <h2 className="text-3xl font-bold text-gray-800 mb-4">
+                QR Code Scanner
+              </h2>
+              <p className="text-gray-600 mb-6">
+                Scan visitor QR codes for entry/exit logging
+              </p>
+              <Link
+                to="/scan"
+                className="inline-flex items-center px-8 py-4 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-semibold rounded-xl shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-300"
+              >
+                Open Scanner
+                <QrCodeIcon className="w-5 h-5 ml-2" />
+              </Link>
+            </div>
+          )}
+
+          {activeTab === "reports" && isLoggedIn() && (
+            <div className="bg-white/70 backdrop-blur-lg rounded-3xl shadow-xl border border-white/20 p-8 text-center">
+              <DocumentArrowDownIcon className="w-16 h-16 text-indigo-600 mx-auto mb-4" />
+              <h2 className="text-3xl font-bold text-gray-800 mb-4">
+                Visitor Reports
+              </h2>
+              <p className="text-gray-600 mb-6">
+                Generate and download PDF reports of visitor records
+              </p>
+              <Link
+                to="/visitor-reports"
+                className="inline-flex items-center px-8 py-4 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-semibold rounded-xl shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-300"
+              >
+                Generate Reports
+                <DocumentArrowDownIcon className="w-5 h-5 ml-2" />
+              </Link>
+            </div>
+          )}
+        </main>
+      </div>
+    </div>
   );
 };
 

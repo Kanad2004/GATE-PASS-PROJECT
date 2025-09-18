@@ -34,7 +34,7 @@ router.post(
   asyncHandler(user_verification.scanQr)
 );
 router.get(
-  "/download-log",
+  "/generate-visitor-report",
   authenticateAdmin,
   asyncHandler(user_verification.downloadLog)
 );

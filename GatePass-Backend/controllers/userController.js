@@ -425,130 +425,237 @@ const user_verification = {
   },
 
   downloadLog: async (req, res) => {
-    const { date } = req.query;
-    if (!date) {
-      res.status(400).json(new ApiResponse(400, {}, "Date is required"));
-      return;
+    const { startDate, endDate, status, search } = req.query;
+
+    if (!startDate || !endDate) {
+      throw new ApiError(400, "Start date and end date are required");
     }
 
     let doc;
     try {
-      const startDate = new Date(date);
-      const endDate = new Date(startDate);
-      endDate.setDate(endDate.getDate() + 1);
+      // Parse and validate dates
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999); // Include full end date
 
-      const users = await User.find({
-        "entries.entryTime": { $gte: startDate, $lt: endDate },
-      }).select("name email purpose visitDateAndTime entries");
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+        throw new ApiError(400, "Invalid date format");
+      }
 
-      const logData = users
-        .flatMap((user) =>
-          user.entries
-            .filter(
-              (entry) =>
-                entry.entryTime >= startDate && entry.entryTime < endDate
-            )
-            .map((entry) => ({
-              name: user.name,
-              email: user.email,
-              purpose: user.purpose,
-              visitDateAndTime: user.visitDateAndTime,
-              entryTime: entry.entryTime,
-              exitTime: entry.exitTime || "",
-            }))
+      if (start > end) {
+        throw new ApiError(400, "Start date cannot be after end date");
+      }
+
+      // **Build dynamic query based on filters**
+      let query = {};
+
+      // Date range filter - check both visit date and entry dates
+      const dateFilter = {
+        $or: [
+          { visitDateAndTime: { $gte: start, $lte: end } },
+          { "entries.entryTime": { $gte: start, $lte: end } },
+        ],
+      };
+
+      // Status filtering
+      switch (status) {
+        case "completed":
+          // Users with both entry and exit
+          query = {
+            ...dateFilter,
+            entries: {
+              $elemMatch: {
+                entryTime: { $exists: true },
+                exitTime: { $exists: true },
+              },
+            },
+          };
+          break;
+        case "inside":
+          // Users with entry but no exit
+          query = {
+            ...dateFilter,
+            entries: {
+              $elemMatch: {
+                entryTime: { $exists: true },
+                exitTime: { $exists: false },
+              },
+            },
+          };
+          break;
+        case "scheduled":
+          // Users with scheduled visits but no entries
+          query = {
+            ...dateFilter,
+            entries: { $size: 0 },
+            status: "approved",
+          };
+          break;
+        case "all":
+        default:
+          query = dateFilter;
+          break;
+      }
+
+      // **Search functionality across multiple fields**
+      if (search && search.trim()) {
+        const searchTerm = search.trim();
+        const searchRegex = new RegExp(searchTerm, "i"); // Case-insensitive
+
+        query.$and = query.$and || [];
+        query.$and.push({
+          $or: [
+            { name: searchRegex },
+            { email: searchRegex },
+            { purpose: searchRegex },
+            { mobileNumber: searchRegex },
+          ],
+        });
+      }
+
+      // **Fetch users with enhanced selection**
+      const users = await User.find(query)
+        .select(
+          "name email mobileNumber purpose visitDateAndTime entries status createdAt"
         )
-        .sort((a, b) => a.entryTime - b.entryTime); // Sort by entry time
+        .sort({ visitDateAndTime: 1 });
 
-      // Create PDF with improved styling
+      // **Transform data for better reporting**
+      const reportData = [];
+
+      users.forEach((user) => {
+        if (user.entries && user.entries.length > 0) {
+          // Users with actual visits
+          user.entries.forEach((entry) => {
+            // Filter entries within date range
+            const entryInRange =
+              entry.entryTime >= start && entry.entryTime <= end;
+            const visitInRange =
+              user.visitDateAndTime >= start && user.visitDateAndTime <= end;
+
+            if (entryInRange || visitInRange) {
+              reportData.push({
+                name: user.name,
+                email: user.email,
+                mobileNumber: user.mobileNumber,
+                purpose: user.purpose,
+                visitDateAndTime: user.visitDateAndTime,
+                entryTime: entry.entryTime,
+                exitTime: entry.exitTime || null,
+                status: entry.exitTime ? "Completed" : "Inside",
+                duration: entry.exitTime
+                  ? Math.round((entry.exitTime - entry.entryTime) / (1000 * 60))
+                  : null, // Duration in minutes
+              });
+            }
+          });
+        } else if (
+          user.visitDateAndTime >= start &&
+          user.visitDateAndTime <= end
+        ) {
+          // Scheduled users without visits
+          reportData.push({
+            name: user.name,
+            email: user.email,
+            mobileNumber: user.mobileNumber,
+            purpose: user.purpose,
+            visitDateAndTime: user.visitDateAndTime,
+            entryTime: null,
+            exitTime: null,
+            status: user.status === "approved" ? "Scheduled" : user.status,
+            duration: null,
+          });
+        }
+      });
+
+      // Sort by visit date, then entry time
+      reportData.sort((a, b) => {
+        const aDate = a.visitDateAndTime;
+        const bDate = b.visitDateAndTime;
+        if (aDate.getTime() !== bDate.getTime()) {
+          return aDate - bDate;
+        }
+        if (a.entryTime && b.entryTime) {
+          return a.entryTime - b.entryTime;
+        }
+        return 0;
+      });
+
+      // **Generate Enhanced PDF**
       doc = new PDFDocument({
         size: "A4",
         margin: 40,
         info: {
-          Title: `Daily Entry Log - ${format(new Date(date), "MMMM d, yyyy")}`,
+          Title: `Visitor Report - ${format(start, "MMM d, yyyy")} to ${format(
+            end,
+            "MMM d, yyyy"
+          )}`,
           Author: "GatePass System",
         },
-        bufferPages: true, // Enable page buffering for accurate page numbers
+        bufferPages: true,
       });
 
-      // Handle errors during PDF generation
-      doc.on("error", (err) => {
-        console.error("PDFDocument error:", err);
-        if (!res.headersSent) {
-          res
-            .status(500)
-            .json(new ApiResponse(500, {}, "Failed to generate PDF log"));
-        }
-      });
-
-      // Set headers and pipe the PDF to the response
+      // Set headers and pipe PDF to response
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader(
         "Content-Disposition",
-        `attachment; filename=entry-log-${date}.pdf`
+        `attachment; filename=visitor-report-${startDate}-to-${endDate}.pdf`
       );
       doc.pipe(res);
 
-      // Define colors for better visual design
+      // **Enhanced PDF Design**
       const colors = {
-        primary: "#2c3e50", // Dark blue header
-        secondary: "#3498db", // Light blue accents
-        header: "#f8f9fa", // Light gray header background
-        border: "#bdc3c7", // Light gray border
-        text: "#333333", // Dark text
-        subtext: "#666666", // Gray text for secondary info
+        primary: "#2c3e50",
+        secondary: "#3498db",
+        success: "#27ae60",
+        warning: "#f39c12",
+        danger: "#e74c3c",
+        header: "#f8f9fa",
+        border: "#bdc3c7",
+        text: "#333333",
+        subtext: "#666666",
       };
 
-      // Function to draw header on each page with improved design
+      // Header function
       const drawHeader = () => {
-        // Add a colored header background
         doc.rect(0, 0, doc.page.width, 80).fill(colors.primary);
 
-        // Add logo space (you can add a logo image here)
         doc
           .circle(60, 40, 20)
           .lineWidth(2)
           .stroke(colors.header)
           .fillAndStroke(colors.secondary, colors.header);
 
-        // Draw the title text with improved formatting
         doc
           .fontSize(22)
           .font("Helvetica-Bold")
           .fillColor("#FFFFFF")
-          .text("GatePass System", 95, 30);
+          .text("GatePass System", 95, 25);
 
         doc
           .fontSize(14)
           .font("Helvetica")
           .fillColor("#FFFFFF")
           .text(
-            `Daily Entry Log - ${format(new Date(date), "MMMM d, yyyy")}`,
+            `Visitor Report - ${format(start, "MMM d, yyyy")} to ${format(
+              end,
+              "MMM d, yyyy"
+            )}`,
             95,
-            55
+            50
           );
 
-        // Add a decorative line
         doc
           .moveTo(40, 90)
           .lineTo(doc.page.width - 40, 90)
           .strokeColor(colors.secondary)
           .lineWidth(2)
           .stroke();
-
-        // Add a subtle shadow line
-        doc
-          .moveTo(40, 92)
-          .lineTo(doc.page.width - 40, 92)
-          .strokeColor(colors.border)
-          .lineWidth(0.5)
-          .stroke();
       };
 
-      // Function to draw footer on each page with improved design
-      const drawFooter = (pageNumber) => {
+      // Footer function
+      const drawFooter = (pageNumber, totalPages) => {
         const footerTop = doc.page.height - 50;
-
-        // Add a decorative line
         doc
           .moveTo(40, footerTop)
           .lineTo(doc.page.width - 40, footerTop)
@@ -556,189 +663,198 @@ const user_verification = {
           .lineWidth(0.5)
           .stroke();
 
-        // Add footer text
         doc
           .fontSize(8)
           .font("Helvetica")
           .fillColor(colors.subtext)
           .text(
-            `GatePass System © ${new Date().getFullYear()} | Generated on ${format(
-              new Date(),
-              "MMMM d, yyyy 'at' h:mm a"
-            )}`,
+            `Generated on ${format(new Date(), "MMM d, yyyy 'at' h:mm a")}`,
             40,
             footerTop + 10,
             { align: "left" }
-          );
-
-        // Add page numbers
-        doc
-          .fontSize(8)
-          .fillColor(colors.subtext)
+          )
           .text(
-            `Page ${pageNumber} of ${doc.bufferedPageRange().count}`,
+            `Page ${pageNumber} of ${totalPages}`,
             doc.page.width - 40,
             footerTop + 10,
             { align: "right" }
           );
       };
 
-      // Function to wrap text and calculate height
-      const wrapText = (text, maxWidth, fontSize) => {
-        doc.fontSize(fontSize).font("Helvetica");
-        const words = text.toString().split(" ");
-        let line = "";
-        const lines = [];
-        for (const word of words) {
-          const testLine = line + (line ? " " : "") + word;
-          const width = doc.widthOfString(testLine);
-          if (width > maxWidth) {
-            if (line) lines.push(line);
-            line = word;
-          } else {
-            line = testLine;
-          }
-        }
-        if (line) lines.push(line);
-        return lines;
-      };
-
-      // Start the first page
+      // Start first page
       drawHeader();
 
-      // Add summary statistics
+      // **Enhanced Summary with Filter Info**
       const summaryTop = 110;
       doc
-        .roundedRect(40, summaryTop, doc.page.width - 80, 60, 5)
+        .roundedRect(40, summaryTop, doc.page.width - 80, 100, 5)
         .fillAndStroke("#f2f9ff", colors.border);
 
       doc
         .fontSize(12)
         .font("Helvetica-Bold")
         .fillColor(colors.primary)
-        .text("Summary Information", 50, summaryTop + 10);
+        .text("Report Summary", 50, summaryTop + 10);
 
+      // Calculate statistics
+      const totalVisitors = reportData.length;
+      const completedVisits = reportData.filter(
+        (r) => r.status === "Completed"
+      ).length;
+      const currentlyInside = reportData.filter(
+        (r) => r.status === "Inside"
+      ).length;
+      const scheduledOnly = reportData.filter(
+        (r) => r.status === "Scheduled"
+      ).length;
+
+      doc.fontSize(10).font("Helvetica").fillColor(colors.text);
+
+      // Left column
       doc
-        .fontSize(10)
-        .font("Helvetica")
-        .fillColor(colors.text)
-        .text(`Total Visitors: ${logData.length}`, 50, summaryTop + 30);
+        .text(`Total Records: ${totalVisitors}`, 50, summaryTop + 35)
+        .text(
+          `Date Range: ${format(start, "MMM d, yyyy")} to ${format(
+            end,
+            "MMM d, yyyy"
+          )}`,
+          50,
+          summaryTop + 50
+        )
+        .text(
+          `Filter Applied: ${
+            status === "all"
+              ? "All Status"
+              : status.charAt(0).toUpperCase() + status.slice(1)
+          }`,
+          50,
+          summaryTop + 65
+        );
 
-      // Calculate if any visitors are still inside (no exit time)
-      const stillInside = logData.filter((entry) => !entry.exitTime).length;
-      doc.text(`Visitors Still Inside: ${stillInside}`, 250, summaryTop + 30);
+      // Right column
+      doc
+        .text(`Completed Visits: ${completedVisits}`, 300, summaryTop + 35)
+        .text(`Currently Inside: ${currentlyInside}`, 300, summaryTop + 50)
+        .text(`Scheduled Only: ${scheduledOnly}`, 300, summaryTop + 65);
 
-      // Table setup with improved styling and better sizing
-      const tableTop = summaryTop + 80;
-      const colWidths = [100, 130, 90, 75, 75, 85];
+      if (search && search.trim()) {
+        doc.text(`Search Term: "${search.trim()}"`, 50, summaryTop + 80);
+      }
+
+      // **Enhanced Table with Status Colors and Duration**
+      const tableTop = summaryTop + 120;
+      const colWidths = [80, 100, 60, 70, 70, 70, 60, 50];
       const headers = [
         "Name",
         "Email",
+        "Mobile",
         "Purpose",
         "Visit Date",
         "Entry Time",
         "Exit Time",
+        "Status",
       ];
-      const baseRowHeight = 25; // Base row height
-      const padding = 6; // Cell padding
+      const baseRowHeight = 25;
+      const padding = 4;
 
-      // Make sure table fits on page width
       const tableWidth = colWidths.reduce((sum, width) => sum + width, 0);
       const tableX = (doc.page.width - tableWidth) / 2;
 
-      // Draw table header background
+      // Table header
       doc
         .rect(tableX, tableTop, tableWidth, baseRowHeight)
         .fill(colors.secondary);
-
-      // Draw table headers with better styling
-      doc.fontSize(10).font("Helvetica-Bold").fillColor("#FFFFFF");
+      doc.fontSize(9).font("Helvetica-Bold").fillColor("#FFFFFF");
 
       let x = tableX;
       headers.forEach((header, i) => {
         doc.text(header, x + padding, tableTop + padding, {
           width: colWidths[i] - padding * 2,
-          align: i >= 3 ? "center" : "left", // Center align date/time columns
+          align: i >= 4 ? "center" : "left",
         });
         x += colWidths[i];
       });
 
-      // Draw table rows with alternating background colors
+      // Table rows with status-based coloring
       let y = tableTop + baseRowHeight;
-      doc.fontSize(9).font("Helvetica");
+      doc.fontSize(8).font("Helvetica");
 
-      logData.forEach((row, index) => {
-        // Format dates properly for better display
-        const formattedVisitDate = format(
-          new Date(row.visitDateAndTime),
-          "MMM d, yyyy"
+      reportData.forEach((row, index) => {
+        // Calculate row height for wrapped text
+        const maxLines = Math.max(
+          Math.ceil(
+            doc.widthOfString(row.name || "") / (colWidths[0] - padding * 2)
+          ),
+          Math.ceil(
+            doc.widthOfString(row.purpose || "") / (colWidths[3] - padding * 2)
+          ),
+          1
         );
-        const formattedVisitTime = format(
-          new Date(row.visitDateAndTime),
-          "h:mm a"
-        );
-        const formattedEntryDate = format(
-          new Date(row.entryTime),
-          "MMM d, yyyy"
-        );
-        const formattedEntryTime = format(new Date(row.entryTime), "h:mm a");
-
-        let formattedExitTime = "-";
-        if (row.exitTime) {
-          formattedExitTime = format(new Date(row.exitTime), "h:mm a");
-        }
-
-        const rowData = [
-          row.name,
-          row.email,
-          row.purpose,
-          `${formattedVisitDate}\n${formattedVisitTime}`,
-          formattedEntryTime,
-          formattedExitTime,
-        ];
-
-        // Calculate row height based on wrapped text
-        let maxLines = 1;
-        rowData.forEach((cell, i) => {
-          const cellText = cell || "-";
-          const lines = wrapText(cellText, colWidths[i] - padding * 2, 9);
-          maxLines = Math.max(maxLines, lines.length);
-        });
         const dynamicRowHeight = Math.max(
           baseRowHeight,
-          12 * maxLines + padding * 2
+          10 * maxLines + padding * 2
         );
 
-        // Draw alternating row background
+        // Alternating row background
         doc
           .rect(tableX, y, tableWidth, dynamicRowHeight)
           .fill(index % 2 === 0 ? "#f9f9f9" : "#ffffff");
 
-        // Draw row content
+        // Row data with proper formatting
+        const visitDate = row.visitDateAndTime
+          ? format(new Date(row.visitDateAndTime), "MMM d")
+          : "-";
+        const entryTime = row.entryTime
+          ? format(new Date(row.entryTime), "h:mm a")
+          : "-";
+        const exitTime = row.exitTime
+          ? format(new Date(row.exitTime), "h:mm a")
+          : "-";
+
+        const rowData = [
+          row.name || "",
+          row.email || "",
+          row.mobileNumber || "",
+          row.purpose || "",
+          visitDate,
+          entryTime,
+          exitTime,
+          row.status || "Unknown",
+        ];
+
+        // Draw cell content with status-based colors
         x = tableX;
         rowData.forEach((cell, i) => {
-          // Highlight rows with no exit time
-          if (i === 5 && cell === "-") {
-            doc.fillColor("#e74c3c"); // Red color for missing exit time
-          } else {
-            doc.fillColor(colors.text);
+          let textColor = colors.text;
+
+          // Status-based coloring
+          if (i === 7) {
+            // Status column
+            switch (row.status) {
+              case "Completed":
+                textColor = colors.success;
+                break;
+              case "Inside":
+                textColor = colors.warning;
+                break;
+              case "Scheduled":
+                textColor = colors.secondary;
+                break;
+              default:
+                textColor = colors.text;
+            }
           }
 
-          const cellText = cell || "-";
-          const lines = wrapText(cellText, colWidths[i] - padding * 2, 9);
-          lines.forEach((line, lineIndex) => {
-            doc.text(line, x + padding, y + padding + lineIndex * 12, {
-              width: colWidths[i] - padding * 2,
-              align: i >= 3 ? "center" : "left", // Center align date/time columns
-            });
+          doc.fillColor(textColor);
+          doc.text(cell, x + padding, y + padding, {
+            width: colWidths[i] - padding * 2,
+            align: i >= 4 ? "center" : "left",
           });
           x += colWidths[i];
         });
 
-        // Draw cell borders
+        // Draw borders
         doc.strokeColor(colors.border).lineWidth(0.5);
-
-        // Draw vertical lines
         x = tableX;
         for (let i = 0; i <= headers.length; i++) {
           doc
@@ -747,8 +863,6 @@ const user_verification = {
             .stroke();
           x += colWidths[i] || 0;
         }
-
-        // Draw horizontal line below each row
         doc
           .moveTo(tableX, y + dynamicRowHeight)
           .lineTo(tableX + tableWidth, y + dynamicRowHeight)
@@ -756,93 +870,63 @@ const user_verification = {
 
         y += dynamicRowHeight;
 
-        // Handle page overflow
-        if (y > doc.page.height - 70) {
-          drawFooter(doc.bufferedPageRange().start + 1);
+        // Page break handling
+        if (y > doc.page.height - 80) {
+          drawFooter(doc.bufferedPageRange().start + 1, "?");
           doc.addPage();
           drawHeader();
 
-          // Redraw table headers on new page
+          // Redraw table header
           doc
             .rect(tableX, tableTop, tableWidth, baseRowHeight)
             .fill(colors.secondary);
-
-          doc.fontSize(10).font("Helvetica-Bold").fillColor("#FFFFFF");
-
+          doc.fontSize(9).font("Helvetica-Bold").fillColor("#FFFFFF");
           x = tableX;
           headers.forEach((header, i) => {
             doc.text(header, x + padding, tableTop + padding, {
               width: colWidths[i] - padding * 2,
-              align: i >= 3 ? "center" : "left",
+              align: i >= 4 ? "center" : "left",
             });
             x += colWidths[i];
           });
-
-          // Reset y position for new page
           y = tableTop + baseRowHeight;
-          doc.fontSize(9).font("Helvetica");
+          doc.fontSize(8).font("Helvetica");
         }
       });
 
-      // If no entries found, show a message
-      if (logData.length === 0) {
+      // No data message
+      if (reportData.length === 0) {
         doc
           .fontSize(12)
-          .font("Helvetica") // Changed from Helvetica-Italic to Helvetica
-          .fillColor(colors.subtext)
-          .text("No entries found for this date.", 40, tableTop + 40, {
-            align: "center",
-            width: doc.page.width - 80,
-          });
-      }
-
-      // Add notes section at bottom if space allows
-      if (y < doc.page.height - 120) {
-        const notesTop = y + 20;
-
-        doc
-          .roundedRect(40, notesTop, doc.page.width - 80, 60, 5)
-          .fillAndStroke("#f9f9f9", colors.border);
-
-        doc
-          .fontSize(11)
-          .font("Helvetica-Bold")
-          .fillColor(colors.primary)
-          .text("Notes", 50, notesTop + 10);
-
-        doc
-          .fontSize(9)
           .font("Helvetica")
           .fillColor(colors.subtext)
           .text(
-            "This report was automatically generated by the GatePass System. For any discrepancies, please contact the system administrator.",
-            50,
-            notesTop + 30,
+            "No records found matching the selected criteria.",
+            40,
+            tableTop + 40,
             {
-              width: doc.page.width - 100,
+              align: "center",
+              width: doc.page.width - 80,
             }
           );
       }
 
-      // Insert page numbers and draw footers on all pages
+      // Insert page numbers on all pages
       const range = doc.bufferedPageRange();
       for (let i = 0; i < range.count; i++) {
         doc.switchToPage(i);
-        drawFooter(i + 1);
+        drawFooter(i + 1, range.count);
       }
 
       doc.end();
     } catch (error) {
-      console.error("Error generating PDF log:", error);
-      // Ensure we don't attempt to write to the response if headers are already sent
+      console.error("Error generating visitor report:", error);
       if (!res.headersSent) {
         res
           .status(500)
-          .json(new ApiResponse(500, {}, "Failed to generate PDF log"));
-      } else {
-        // If headers are sent, ensure the document is ended to prevent further writes
-        doc?.end();
+          .json(new ApiError(500, "Failed to generate visitor report"));
       }
+      if (doc) doc.end();
     }
   },
 };
