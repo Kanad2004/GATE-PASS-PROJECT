@@ -11,7 +11,7 @@ const app = express();
 // Middleware
 app.use(
   cors({
-    origin: "http://localhost:3000", // Frontend URL
+    origin: "https://gate-pass-project.vercel.app", // Frontend URL
     credentials: true, // Allow cookies to be sent
   })
 );

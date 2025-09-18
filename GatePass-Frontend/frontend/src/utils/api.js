@@ -2,7 +2,8 @@ import axios from "axios";
 
 // **API Configuration**
 const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
+  import.meta.env.VITE_API_BASE_URL ||
+  "https://gate-pass-project-1.onrender.com/api/v1";
 const REQUEST_TIMEOUT = 15000;
 
 // Create axios instance with enhanced configuration
