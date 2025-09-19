@@ -73,9 +73,9 @@ const user_register = {
         throw new ApiError(400, "Invalid visit date and time");
       }
       const hours = visitDate.getHours();
-      if (hours < 9 || hours >= 18) {
-        throw new ApiError(400, "Visits allowed between 9 AM and 6 PM");
-      }
+      // if (hours < 9 || hours >= 18) {
+      //   throw new ApiError(400, "Visits allowed between 9 AM and 6 PM");
+      // }
 
       const otp = await user_register.create_otp(email);
       const mailOptions = {
