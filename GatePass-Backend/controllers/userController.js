@@ -25,17 +25,32 @@ const createTransporter = () => {
 
   const transporter = nodemailer.createTransport({
     host: "smtp-relay.brevo.com",
-    port: 465,
-    secure: true, // true for 465, false for other ports
+    port: 587, // Changed from 465 to 587
+    secure: false, // Changed from true to false for port 587
+    requireTLS: true, // Add this for security
+    connectionTimeout: 60000, // 60 seconds timeout
+    greetingTimeout: 30000, // 30 seconds greeting timeout
+    socketTimeout: 75000, // 75 seconds socket timeout
     auth: {
-      user: process.env.EMAIL_USER, // This will be your Brevo login email
-      pass: process.env.EMAIL_PASS, // This will be your Brevo SMTP key
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
     },
+    // Add these retry and pool options
+    pool: true,
+    maxConnections: 5,
+    maxMessages: 100,
+    rateLimit: 14, // messages per second (Brevo limit)
   });
 
+  // Enhanced verification with better error handling
   transporter.verify((error, success) => {
     if (error) {
       console.error("Nodemailer configuration error:", error);
+      console.error("Error details:", {
+        code: error.code,
+        command: error.command,
+        response: error.response,
+      });
     } else {
       console.log("Nodemailer is ready to send emails");
     }
